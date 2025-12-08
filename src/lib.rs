@@ -235,17 +235,45 @@ impl Encoder {
         self.write_bits(bits, 19);
     }
 
-    /// Get the estimated encoded size in bytes
+    /// Get the encoded size in bytes
     #[inline]
     #[must_use]
     pub fn size(&self) -> usize {
         if self.count == 0 {
             return 0;
         }
-        HEADER_SIZE
-            + self.data.len()
-            + (self.bits_in_accum as usize).div_ceil(8)
-            + if self.zero_run > 0 { 2 } else { 0 }
+
+        // Calculate bits needed for pending zero run
+        let zero_run_bits = Self::zero_run_bits(self.zero_run);
+
+        let total_bits = self.bits_in_accum + zero_run_bits;
+
+        HEADER_SIZE + self.data.len() + (total_bits as usize).div_ceil(8)
+    }
+
+    /// Calculate the number of bits needed to encode a zero run
+    #[inline]
+    fn zero_run_bits(mut n: u32) -> u32 {
+        let mut bits = 0;
+        while n > 0 {
+            if n == 1 {
+                bits += 1;
+                n = 0;
+            } else if n <= 5 {
+                bits += 5;
+                n = 0;
+            } else if n <= 21 {
+                bits += 8;
+                n = 0;
+            } else if n <= 149 {
+                bits += 12;
+                n = 0;
+            } else {
+                bits += 12;
+                n -= 149;
+            }
+        }
+        bits
     }
 
     /// Get the number of readings encoded
@@ -448,14 +476,10 @@ impl Encoder {
         self.bit_accum = (self.bit_accum << num_bits) | u64::from(value);
         self.bits_in_accum += num_bits;
 
-        // Unrolled flush for common cases
-        if self.bits_in_accum >= 8 {
+        // Flush complete bytes to prevent overflow
+        while self.bits_in_accum >= 8 {
             self.bits_in_accum -= 8;
             self.data.push((self.bit_accum >> self.bits_in_accum) as u8);
-            if self.bits_in_accum >= 8 {
-                self.bits_in_accum -= 8;
-                self.data.push((self.bit_accum >> self.bits_in_accum) as u8);
-            }
         }
     }
 
@@ -1119,6 +1143,209 @@ mod tests {
         assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0].temperature, 24);
         assert_eq!(decoded[1].temperature, 25);
+    }
+
+    #[test]
+    fn test_size_matches_to_bytes() {
+        // Empty encoder
+        let enc = Encoder::new();
+        assert_eq!(enc.size(), enc.to_bytes().len());
+
+        // Single reading
+        let mut enc = Encoder::new();
+        enc.append(1761955455, 22);
+        assert_eq!(enc.size(), enc.to_bytes().len());
+
+        // Multiple readings with zero deltas (tests zero_run estimation)
+        let mut enc = Encoder::new();
+        for i in 0..10 {
+            enc.append(1761955455 + i * 300, 22);
+        }
+        assert_eq!(enc.size(), enc.to_bytes().len());
+
+        // Readings with varying deltas
+        let mut enc = Encoder::new();
+        let temps = [22, 23, 21, 25, 20, 30, 15];
+        for (i, &t) in temps.iter().enumerate() {
+            enc.append(1761955455 + i as u64 * 300, t);
+        }
+        assert_eq!(enc.size(), enc.to_bytes().len());
+
+        // Long zero run (tests zero_run > 149)
+        let mut enc = Encoder::new();
+        for i in 0..200 {
+            enc.append(1761955455 + i * 300, 22);
+        }
+        assert_eq!(enc.size(), enc.to_bytes().len());
+
+        // Mixed: some zeros, some deltas
+        let mut enc = Encoder::new();
+        for i in 0..50 {
+            let temp = if i % 10 == 0 { 25 } else { 22 };
+            enc.append(1761955455 + i * 300, temp);
+        }
+        assert_eq!(enc.size(), enc.to_bytes().len());
+    }
+
+    #[test]
+    fn test_size_incremental_with_jitter() {
+        let base_ts = 1761955455u64;
+        let mut enc = Encoder::new();
+
+        // Simple PRNG for deterministic jitter (no external deps)
+        let mut seed: u32 = 12345;
+        let mut next_jitter = || {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed % 100) as u64 // 0-99 seconds jitter
+        };
+
+        // Simple PRNG for temperature changes
+        let mut temp_seed: u32 = 67890;
+        let mut next_temp_delta = || {
+            temp_seed = temp_seed.wrapping_mul(1103515245).wrapping_add(12345);
+            match temp_seed % 10 {
+                0 => 1,       // 10% chance +1
+                1 => -1,      // 10% chance -1
+                2 => 2,       // 10% chance +2
+                3 => -2,      // 10% chance -2
+                _ => 0,       // 60% chance no change
+            }
+        };
+
+        let mut temp = 22i32;
+        let mut prev_logical_idx = 0u64;
+
+        for i in 0..300 {
+            let jitter = next_jitter();
+            let ts = base_ts + i * 300 + jitter;
+
+            // Calculate logical index to check if this reading will be accepted
+            let logical_idx = if enc.count() == 0 {
+                0
+            } else {
+                (ts - base_ts) / 300
+            };
+
+            // Only update temp if reading will be accepted (not a duplicate)
+            if enc.count() == 0 || logical_idx > prev_logical_idx {
+                temp = (temp + next_temp_delta()).clamp(-50, 100);
+                prev_logical_idx = logical_idx;
+            }
+
+            enc.append(ts, temp);
+
+            // Assert size matches actual encoded size after each append
+            let actual_size = enc.to_bytes().len();
+            let estimated_size = enc.size();
+
+            assert_eq!(
+                estimated_size, actual_size,
+                "size mismatch at iteration {}: estimated={}, actual={}",
+                i, estimated_size, actual_size
+            );
+        }
+    }
+
+    #[test]
+    fn test_size_constant_temperature_incremental() {
+        let base_ts = 1761955455u64;
+        let mut enc = Encoder::new();
+
+        // Constant temperature - maximum compression via zero runs
+        for i in 0..300 {
+            enc.append(base_ts + i * 300, 22);
+
+            let actual_size = enc.to_bytes().len();
+            let estimated_size = enc.size();
+
+            assert_eq!(
+                estimated_size, actual_size,
+                "size mismatch at iteration {}: estimated={}, actual={}",
+                i, estimated_size, actual_size
+            );
+        }
+    }
+
+    #[test]
+    fn test_size_alternating_temperature_incremental() {
+        let base_ts = 1761955455u64;
+        let mut enc = Encoder::new();
+
+        // Alternating temperature - no zero runs, all ±1 deltas
+        for i in 0..300 {
+            let temp = if i % 2 == 0 { 22 } else { 23 };
+            enc.append(base_ts + i * 300, temp);
+
+            let actual_size = enc.to_bytes().len();
+            let estimated_size = enc.size();
+
+            assert_eq!(
+                estimated_size, actual_size,
+                "size mismatch at iteration {}: estimated={}, actual={}",
+                i, estimated_size, actual_size
+            );
+        }
+    }
+
+    #[test]
+    fn test_size_large_deltas_incremental() {
+        let base_ts = 1761955455u64;
+        let mut enc = Encoder::new();
+
+        // Large temperature swings - tests large delta encoding
+        for i in 0..300 {
+            let temp = if i % 2 == 0 { 0 } else { 100 };
+            enc.append(base_ts + i * 300, temp);
+
+            let actual_size = enc.to_bytes().len();
+            let estimated_size = enc.size();
+
+            assert_eq!(
+                estimated_size, actual_size,
+                "size mismatch at iteration {}: estimated={}, actual={}",
+                i, estimated_size, actual_size
+            );
+        }
+    }
+
+    #[test]
+    fn test_duplicate_day_events_skipped() {
+        let base_ts = 1761955455u64;
+        let mut encoder = Encoder::new();
+
+        // Append a full day of events (288 readings at 5-min intervals)
+        for i in 0..288 {
+            encoder.append(base_ts + i * 300, 22);
+        }
+        assert_eq!(encoder.count(), 288);
+
+        // Append the same day again
+        for i in 0..288 {
+            encoder.append(base_ts + i * 300, 22);
+        }
+
+        // Should still be 288, not 576
+        assert_eq!(encoder.count(), 288);
+    }
+
+    #[test]
+    fn test_duplicate_day_events_with_different_timestamps_skipped() {
+        let base_ts = 1761955455u64;
+        let mut encoder = Encoder::new();
+
+        // Append 576 events with unique timestamps, but they should all
+        // fall into 288 logical slots (2 events per 300-second interval)
+        for i in 0..576 {
+            // First 288 events at start of each interval
+            // Next 288 events at 150 seconds into each interval
+            let slot = i % 288;
+            let offset = if i < 288 { 0 } else { 150 };
+            let ts = base_ts + slot * 300 + offset;
+            encoder.append(ts, 22);
+        }
+
+        // Should be 288, not 576 - duplicates within same slot are skipped
+        assert_eq!(encoder.count(), 288);
     }
 
     #[test]
