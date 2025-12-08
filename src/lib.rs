@@ -244,6 +244,147 @@ impl Encoder {
         self.count as usize
     }
 
+    /// Decode the encoder's contents back to readings
+    #[must_use]
+    pub fn decode(&self) -> Vec<Reading> {
+        if self.count == 0 {
+            return Vec::new();
+        }
+
+        let mut decoded = Vec::with_capacity(self.count as usize);
+        decoded.push(Reading {
+            ts: self.base_ts,
+            temperature: self.first_temp,
+        });
+
+        if self.count == 1 && self.data.is_empty() && self.bits_in_accum == 0 && self.zero_run == 0
+        {
+            return decoded;
+        }
+
+        // Build finalized bit data (same as to_bytes but just the data portion)
+        let mut final_data = self.data.clone();
+        let mut accum = self.bit_accum;
+        let mut bits = self.bits_in_accum;
+        let mut zeros = self.zero_run;
+
+        while zeros > 0 {
+            let (b, n, c) = encode_zero_run(zeros);
+            accum = (accum << n) | u64::from(b);
+            bits += n;
+            zeros -= c;
+        }
+
+        while bits >= 8 {
+            bits -= 8;
+            final_data.push((accum >> bits) as u8);
+        }
+
+        if bits > 0 {
+            final_data.push((accum << (8 - bits)) as u8);
+        }
+
+        let mut reader = BitReader::new(&final_data);
+        let mut prev_temp = self.first_temp;
+        let mut idx = 1u64;
+        let count = self.count as usize;
+
+        while decoded.len() < count && reader.has_more() {
+            if reader.read_bits(1) == 0 {
+                decoded.push(Reading {
+                    ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                    temperature: prev_temp,
+                });
+                idx += 1;
+                continue;
+            }
+            if reader.read_bits(1) == 0 {
+                prev_temp += if reader.read_bits(1) == 0 { 1 } else { -1 };
+                decoded.push(Reading {
+                    ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                    temperature: prev_temp,
+                });
+                idx += 1;
+                continue;
+            }
+            if reader.read_bits(1) == 0 {
+                for _ in 0..reader.read_bits(2) + 2 {
+                    if decoded.len() >= count {
+                        break;
+                    }
+                    decoded.push(Reading {
+                        ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                        temperature: prev_temp,
+                    });
+                    idx += 1;
+                }
+                continue;
+            }
+            if reader.read_bits(1) == 0 {
+                for _ in 0..reader.read_bits(4) + 6 {
+                    if decoded.len() >= count {
+                        break;
+                    }
+                    decoded.push(Reading {
+                        ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                        temperature: prev_temp,
+                    });
+                    idx += 1;
+                }
+                continue;
+            }
+            if reader.read_bits(1) == 0 {
+                for _ in 0..reader.read_bits(7) + 22 {
+                    if decoded.len() >= count {
+                        break;
+                    }
+                    decoded.push(Reading {
+                        ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                        temperature: prev_temp,
+                    });
+                    idx += 1;
+                }
+                continue;
+            }
+            if reader.read_bits(1) == 0 {
+                prev_temp += if reader.read_bits(1) == 0 { 2 } else { -2 };
+                decoded.push(Reading {
+                    ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                    temperature: prev_temp,
+                });
+                idx += 1;
+                continue;
+            }
+            if reader.read_bits(1) == 0 {
+                let e = reader.read_bits(4) as i32;
+                prev_temp += if e < 8 { e - 10 } else { e - 5 };
+                decoded.push(Reading {
+                    ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                    temperature: prev_temp,
+                });
+                idx += 1;
+                continue;
+            }
+            if reader.read_bits(1) == 0 {
+                let raw = reader.read_bits(11);
+                prev_temp += if raw & 0x400 != 0 {
+                    (raw | 0xFFFF_F800) as i32
+                } else {
+                    raw as i32
+                };
+                decoded.push(Reading {
+                    ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                    temperature: prev_temp,
+                });
+                idx += 1;
+            } else {
+                idx += u64::from(reader.read_bits(6) + 1);
+            }
+        }
+
+        decoded
+    }
+
     /// Finalize and return the encoded bytes
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -565,8 +706,7 @@ mod tests {
         for (i, &t) in temps.iter().enumerate() {
             enc.append(base + i as u64 * 300, t);
         }
-        let bytes = enc.to_bytes();
-        let dec = decode(&bytes);
+        let dec = enc.decode();
         assert_eq!(dec.len(), temps.len());
         for (i, r) in dec.iter().enumerate() {
             assert_eq!(r.temperature, temps[i]);
@@ -584,8 +724,7 @@ mod tests {
     fn test_single_reading() {
         let mut enc = Encoder::new();
         enc.append(1761955455, 22);
-        let bytes = enc.to_bytes();
-        let dec = decode(&bytes);
+        let dec = enc.decode();
         assert_eq!(dec.len(), 1);
         assert_eq!(dec[0].temperature, 22);
     }
@@ -598,8 +737,7 @@ mod tests {
         enc.append(base + 300, SENTINEL_VALUE);
         enc.append(base + 600, SENTINEL_VALUE);
         enc.append(base + 900, 23);
-        let bytes = enc.to_bytes();
-        let dec = decode(&bytes);
+        let dec = enc.decode();
         assert_eq!(dec.len(), 2);
         assert_eq!(dec[0].temperature, 22);
         assert_eq!(dec[1].temperature, 23);
@@ -612,8 +750,7 @@ mod tests {
         for i in 0..200 {
             enc.append(base + i * 300, 22);
         }
-        let bytes = enc.to_bytes();
-        let dec = decode(&bytes);
+        let dec = enc.decode();
         assert_eq!(dec.len(), 200);
         for r in &dec {
             assert_eq!(r.temperature, 22);
@@ -639,8 +776,7 @@ mod tests {
         for (i, &t) in temps.iter().enumerate() {
             enc.append(base + i as u64 * 300, t);
         }
-        let bytes = enc.to_bytes();
-        let dec = decode(&bytes);
+        let dec = enc.decode();
         assert_eq!(dec.len(), temps.len());
         for (i, r) in dec.iter().enumerate() {
             assert_eq!(r.temperature, temps[i], "mismatch at {}", i);
@@ -658,8 +794,7 @@ mod tests {
             enc.append(base + i as u64 * 300, t);
         }
 
-        let bytes = enc.to_bytes();
-        let dec = decode(&bytes);
+        let dec = enc.decode();
 
         assert_eq!(dec.len(), temps.len(), "count mismatch");
         for (i, r) in dec.iter().enumerate() {
@@ -677,8 +812,7 @@ mod tests {
             enc.append(base + i as u64 * 300, t);
         }
 
-        let bytes = enc.to_bytes();
-        let dec = decode(&bytes);
+        let dec = enc.decode();
 
         assert_eq!(dec.len(), temps.len(), "count mismatch");
         for (i, r) in dec.iter().enumerate() {
@@ -720,8 +854,7 @@ mod tests {
             encoder.append(base_ts + i * 300, 22);
         }
 
-        let bytes = encoder.to_bytes();
-        let decoded = decode(&bytes);
+        let decoded = encoder.decode();
 
         assert_eq!(decoded.len(), 10);
         for reading in &decoded {
@@ -739,8 +872,7 @@ mod tests {
             encoder.append(base_ts + i as u64 * 300, temp);
         }
 
-        let bytes = encoder.to_bytes();
-        let decoded = decode(&bytes);
+        let decoded = encoder.decode();
 
         assert_eq!(decoded.len(), 5);
         for (i, reading) in decoded.iter().enumerate() {
@@ -757,8 +889,7 @@ mod tests {
         encoder.append(base_ts + 300, 25); // +5
         encoder.append(base_ts + 600, 20); // -5
 
-        let bytes = encoder.to_bytes();
-        let decoded = decode(&bytes);
+        let decoded = encoder.decode();
 
         assert_eq!(decoded.len(), 3);
         assert_eq!(decoded[0].temperature, 20);
@@ -775,8 +906,7 @@ mod tests {
         encoder.append(base_ts + 300, 520); // +500
         encoder.append(base_ts + 600, 20);  // -500
 
-        let bytes = encoder.to_bytes();
-        let decoded = decode(&bytes);
+        let decoded = encoder.decode();
 
         assert_eq!(decoded.len(), 3);
         assert_eq!(decoded[0].temperature, 20);
@@ -807,8 +937,7 @@ mod tests {
             encoder.append(base_ts + i * 300, 22);
         }
 
-        let bytes = encoder.to_bytes();
-        let decoded = decode(&bytes);
+        let decoded = encoder.decode();
 
         assert_eq!(decoded.len(), 50);
         for reading in &decoded {
@@ -831,8 +960,7 @@ mod tests {
             encoder.append(ts, temp);
         }
 
-        let bytes = encoder.to_bytes();
-        let decoded = decode(&bytes);
+        let decoded = encoder.decode();
 
         // All readings should be preserved
         assert_eq!(decoded.len(), 10);
@@ -874,8 +1002,7 @@ mod tests {
             encoder.append(ts, temp);
         }
 
-        let bytes = encoder.to_bytes();
-        let decoded = decode(&bytes);
+        let decoded = encoder.decode();
 
         assert_eq!(decoded.len(), 5);
 
@@ -922,8 +1049,7 @@ mod tests {
             encoder.append(ts, temp);
         }
 
-        let bytes = encoder.to_bytes();
-        let decoded = decode(&bytes);
+        let decoded = encoder.decode();
 
         assert_eq!(decoded.len(), 5);
 
