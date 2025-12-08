@@ -181,8 +181,19 @@ impl Encoder {
             return;
         }
 
+        // Skip out-of-order readings (ts before base_ts)
+        if ts < self.base_ts {
+            return;
+        }
+
         // Calculate logical index using fast division
         let logical_idx = fast_div_300(ts - self.base_ts) as u32;
+
+        // Skip readings that go backwards or are duplicates (same logical index)
+        if logical_idx <= self.prev_logical_idx {
+            return;
+        }
+
         let index_gap = logical_idx - self.prev_logical_idx;
 
         // Gap handling (rare)
@@ -947,16 +958,17 @@ mod tests {
 
     #[test]
     fn test_with_timestamp_jitter() {
-        // Simulate real-world sensor readings with ±5 second jitter
+        // Simulate real-world sensor readings with small positive jitter
+        // (negative jitter could cause readings to fall into previous interval)
         let base_ts = 1761955455u64;
         let temps = [22, 23, 23, 22, 21, 21, 22, 23, 22, 21];
 
-        // Add jitter: some readings arrive early, some late
-        let jitter = [0i64, 3, -2, 5, -5, 1, -3, 4, -1, 2];
+        // Positive jitter only to ensure each reading lands in its expected interval
+        let jitter = [0u64, 3, 2, 5, 5, 1, 3, 4, 1, 2];
 
         let mut encoder = Encoder::new();
         for (i, (&temp, &j)) in temps.iter().zip(jitter.iter()).enumerate() {
-            let ts = (base_ts as i64 + (i as i64 * 300) + j) as u64;
+            let ts = base_ts + (i as u64 * 300) + j;
             encoder.append(ts, temp);
         }
 
@@ -1031,17 +1043,17 @@ mod tests {
         let day_start = 1764547200u64;
 
         // Input readings with realistic jitter:
-        // 00:00:03 -> temp 25
-        // 00:05:10 -> temp 25
-        // 00:10:20 -> temp 26
-        // 00:15:02 -> temp 25
-        // 01:35:05 -> temp 26
+        // 00:00:03 -> temp 25 (logical idx 0)
+        // 00:05:10 -> temp 25 (logical idx 1)
+        // 00:10:20 -> temp 26 (logical idx 2)
+        // 00:15:02 -> temp 25 (logical idx 2 - SKIPPED, same as previous)
+        // 01:35:05 -> temp 26 (logical idx 19)
         let inputs: [(u64, i32); 5] = [
-            (day_start + 0 * 60 + 3, 25),  // 00:00:03
-            (day_start + 5 * 60 + 10, 25), // 00:05:10
+            (day_start + 0 * 60 + 3, 25),   // 00:00:03
+            (day_start + 5 * 60 + 10, 25),  // 00:05:10
             (day_start + 10 * 60 + 20, 26), // 00:10:20
-            (day_start + 15 * 60 + 2, 25), // 00:15:02
-            (day_start + 95 * 60 + 5, 26), // 01:35:05
+            (day_start + 15 * 60 + 2, 25),  // 00:15:02 - will be skipped
+            (day_start + 95 * 60 + 5, 26),  // 01:35:05
         ];
 
         let mut encoder = Encoder::new();
@@ -1051,32 +1063,23 @@ mod tests {
 
         let decoded = encoder.decode();
 
-        assert_eq!(decoded.len(), 5);
+        // Only 4 readings - the 4th input is skipped (same logical index as 3rd)
+        assert_eq!(decoded.len(), 4);
 
-        // The encoder assigns sequential logical indices to readings.
-        // When two readings have the same calculated logical index due to jitter,
-        // the second one still gets the next sequential index in the output.
-        //
-        // Input analysis:
-        // base_ts = 1764547203 (00:00:03)
-        // Reading 0: ts=1764547203, calc_idx=0, output_idx=0
-        // Reading 1: ts=1764547510, calc_idx=1, output_idx=1
-        // Reading 2: ts=1764547820, calc_idx=2, output_idx=2
-        // Reading 3: ts=1764548102, calc_idx=2 (same!), output_idx=3
-        // Reading 4: ts=1764552905, calc_idx=19, output_idx=20 (gap of 16 from idx 3)
-        //
-        // The gap between reading 3 (output_idx=3) and reading 4 is:
-        // calc_idx_4 - calc_idx_3 = 19 - 2 = 17 intervals
-        // But since output_idx_3 = 3, the decoder places reading 4 at output_idx = 3 + 17 = 20
+        // Input analysis (base_ts = day_start + 3 = 1764547203):
+        // Reading 0: ts=1764547203, logical_idx=0
+        // Reading 1: ts=1764547510, logical_idx=1
+        // Reading 2: ts=1764547820, logical_idx=2
+        // Reading 3: ts=1764548102, logical_idx=2 -> SKIPPED (duplicate)
+        // Reading 4: ts=1764552905, logical_idx=19
 
         let base_ts = inputs[0].0;
 
-        let expected: [(u64, i32); 5] = [
-            (base_ts + 0 * 300, 25),  // output idx 0
-            (base_ts + 1 * 300, 25),  // output idx 1
-            (base_ts + 2 * 300, 26),  // output idx 2
-            (base_ts + 3 * 300, 25),  // output idx 3 (sequential, despite calc_idx=2)
-            (base_ts + 20 * 300, 26), // output idx 20 (gap of 17 from prev calc_idx)
+        let expected: [(u64, i32); 4] = [
+            (base_ts + 0 * 300, 25),  // logical idx 0
+            (base_ts + 1 * 300, 25),  // logical idx 1
+            (base_ts + 2 * 300, 26),  // logical idx 2
+            (base_ts + 19 * 300, 26), // logical idx 19 (gap of 17 from idx 2)
         ];
 
         for (i, reading) in decoded.iter().enumerate() {
@@ -1092,17 +1095,47 @@ mod tests {
             );
         }
 
-        // Verify temperatures are preserved exactly (lossless)
-        for (i, reading) in decoded.iter().enumerate() {
-            assert_eq!(reading.temperature, inputs[i].1);
-        }
-
-        // Verify the large gap between readings 3 and 4
-        // Reading 3 is at output idx 3, reading 4 is at output idx 20
+        // Verify the large gap between readings 2 and 3
         assert_eq!(
-            decoded[4].ts - decoded[3].ts,
+            decoded[3].ts - decoded[2].ts,
             17 * 300,
-            "gap between readings 3 and 4 should be 17 intervals (5100 seconds)"
+            "gap between readings 2 and 3 should be 17 intervals (5100 seconds)"
         );
+    }
+
+    #[test]
+    fn test_out_of_order_readings_skipped() {
+        let base_ts = 1761955455u64;
+        let mut encoder = Encoder::new();
+
+        // Readings arrive out of order - out-of-order ones are skipped
+        encoder.append(base_ts + 600, 24); // base_ts is set to base_ts + 600
+        encoder.append(base_ts, 22);       // Skipped: ts < base_ts
+        encoder.append(base_ts + 300, 23); // Skipped: logical_idx < prev_logical_idx
+        encoder.append(base_ts + 900, 25); // Accepted: logical_idx > prev_logical_idx
+
+        let decoded = encoder.decode();
+
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].temperature, 24);
+        assert_eq!(decoded[1].temperature, 25);
+    }
+
+    #[test]
+    fn test_duplicate_timestamps_skipped() {
+        let base_ts = 1761955455u64;
+        let mut encoder = Encoder::new();
+
+        encoder.append(base_ts, 22);
+        encoder.append(base_ts, 23);       // Duplicate timestamp - should be skipped
+        encoder.append(base_ts + 5, 24);   // Same logical index (within same 300s interval)
+        encoder.append(base_ts + 300, 25); // Next interval
+
+        let decoded = encoder.decode();
+
+        // Only first reading per logical index should be kept
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].temperature, 22);
+        assert_eq!(decoded[1].temperature, 25);
     }
 }
