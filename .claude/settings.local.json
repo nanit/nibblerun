@@ -1,9 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo build:*)",
-      "Bash(cargo test:*)",
-      "Bash(cargo run:*)"
+      "Bash(/usr/bin/grep -v \"unwrap\\|Err\\|matches\\|_=\")",
+      "Bash(/usr/bin/grep:*)",
+      "Bash(/usr/bin/grep -v \"unwrap\\|Err\\|matches\\|let _\\|const\\|//.*SENTINEL\")",
+      "Bash(cargo fuzz run:*)",
+      "Bash(cargo +nightly fuzz run:*)",
+      "Bash(rustup run nightly cargo fuzz run:*)",
+      "Bash(cargo doc:*)"
     ],
     "deny": [],
     "ask": []

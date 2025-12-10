@@ -20,10 +20,10 @@ let mut enc = Encoder::with_interval(300);
 
 // Append readings (timestamp, temperature)
 // Readings are quantized to interval boundaries
-enc.append(1700000000, 23);  // 00:00:00 -> interval 0
-enc.append(1700000150, 25);  // 00:02:30 -> same interval, averaged with above
-enc.append(1700000300, 24);  // 00:05:00 -> interval 1
-enc.append(1700000600, 22);  // 00:10:00 -> interval 2
+enc.append(1700000000, 23).unwrap();  // 00:00:00 -> interval 0
+enc.append(1700000150, 25).unwrap();  // 00:02:30 -> same interval, averaged with above
+enc.append(1700000300, 24).unwrap();  // 00:05:00 -> interval 1
+enc.append(1700000600, 22).unwrap();  // 00:10:00 -> interval 2
 
 // Serialize to bytes
 let bytes = enc.to_bytes();
@@ -49,10 +49,10 @@ use nibblerun::Encoder;
 
 let mut enc = Encoder::with_interval(300);
 
-enc.append(1700000000, 22);   // 00:00 - interval 0
-enc.append(1700000300, 23);   // 00:05 - interval 1
+enc.append(1700000000, 22).unwrap();   // 00:00 - interval 0
+enc.append(1700000300, 23).unwrap();   // 00:05 - interval 1
 // No data for 00:10, 00:15, 00:20...
-enc.append(1700003000, 25);   // 00:50 - interval 10
+enc.append(1700003000, 25).unwrap();   // 00:50 - interval 10
 
 let readings = enc.decode();
 assert_eq!(readings.len(), 3);
@@ -143,7 +143,7 @@ The `pending_state` field packs multiple values to avoid extra fields:
 
 ### Assumptions
 
-- **Timestamps are monotonically increasing**: Out-of-order readings are silently dropped
+- **Timestamps are monotonically increasing**: Out-of-order readings return an error
 - **Timestamps are Unix seconds**: The library uses an epoch base of 1,760,000,000 (~2025)
 - **Temperature changes are gradual**: The encoding is optimized for small deltas (±10)
 
@@ -152,11 +152,10 @@ The `pending_state` field packs multiple values to avoid extra fields:
 | Limit | Value | Notes |
 |-------|-------|-------|
 | Max readings per encoder | 65,535 | `count` is u16 |
-| Max delta between readings | ±1,023 | Larger deltas panic |
-| Max readings per interval | 1,023 | Additional readings ignored |
-| Min timestamp | 1,760,000,000 | ~2025-10-09, panics if earlier |
+| Max delta between readings | ±1,023 | Larger deltas return error |
+| Max readings per interval | 1,023 | Additional readings return error |
+| Min timestamp | 1,760,000,000 | ~2025-10-09, returns error if earlier |
 | Interval range | 1-65,535 seconds | ~18 hours max |
-| Reserved temperature | -1000 | `SENTINEL_VALUE` for gaps |
 
 ### Performance Characteristics
 
@@ -177,12 +176,44 @@ Run property-based tests (included in unit tests via proptest):
 cargo test proptests
 ```
 
+### Property Tests
+
+The library includes 12 property-based tests that verify invariants across random inputs:
+
+| Property | Description |
+|----------|-------------|
+| `prop_size_accuracy` | `size() == to_bytes().len()` |
+| `prop_count_consistency` | `decode().len() == count()` |
+| `prop_roundtrip_via_bytes` | `decode(to_bytes()) == decode()` |
+| `prop_monotonic_timestamps` | Decoded timestamps are strictly increasing |
+| `prop_idempotent_serialization` | Multiple `to_bytes()` calls return identical results |
+| `prop_timestamp_alignment` | All timestamps align to interval boundaries |
+| `prop_lossy_compression_bounds` | Decoded temps are within [min, max] of interval inputs |
+| `prop_single_reading_identity` | Single reading per interval decodes exactly |
+| `prop_averaging_within_interval` | Multiple readings per interval are averaged correctly |
+| `prop_timestamp_quantization` | Timestamps are quantized to interval boundaries |
+| `prop_gap_preservation` | Gaps between readings are preserved correctly |
+| `prop_interval_deduplication` | Multiple readings in same interval produce one output |
+
 ## Fuzzing
 
 The library includes fuzz targets using cargo-fuzz. Install cargo-fuzz first:
 ```bash
 cargo install cargo-fuzz
 ```
+
+### Fuzz Targets
+
+| Target | Description |
+|--------|-------------|
+| `fuzz_roundtrip` | Tests encode/decode invariants with arbitrary inputs |
+| `fuzz_decode` | Tests that `decode()` never panics on arbitrary bytes |
+| `fuzz_idempotent` | Tests that multiple `to_bytes()` calls return identical results |
+| `fuzz_lossy_bounds` | Tests that decoded temps are within [min, max] of interval inputs |
+| `fuzz_single_reading` | Tests that single reading per interval decodes exactly |
+| `fuzz_averaging` | Tests that multiple readings per interval are averaged correctly |
+| `fuzz_gaps` | Tests that gaps between readings are preserved correctly |
+| `fuzz_lossless` | Tests lossless compression with one reading per interval at exact boundaries, including gaps |
 
 Run fuzz targets:
 ```bash

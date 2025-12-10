@@ -22,7 +22,8 @@ fuzz_target!(|data: &[u8]| {
         let delta = u16::from_le_bytes([chunk[0], chunk[1]]) as u64;
         let temp = chunk[2] as i8 as i32;
         ts = ts.saturating_add(delta);
-        enc.append(ts, temp);
+        // Ignore errors - fuzzer may generate invalid data (out of order, delta overflow, etc)
+        let _ = enc.append(ts, temp);
     }
 
     // Property 1: size() == to_bytes().len()

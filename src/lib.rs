@@ -1,13 +1,22 @@
-//! `NibbleRun` - High-performance lossless time series compression
+//! `NibbleRun` - High-performance time series compression for slow-changing data
 //!
-//! A bit-packed compression format optimized for temperature sensor data
-//! with 5-minute intervals. Achieves ~70-85x compression with O(1) append.
+//! A bit-packed compression format optimized for sensor data that changes gradually,
+//! such as temperature, humidity, or similar environmental readings. Achieves ~70-85x
+//! compression with O(1) append operations.
 //!
 //! # Features
-//! - **High compression**: ~40-50 bytes per day for typical temperature data
+//! - **High compression**: ~40-50 bytes per day for typical sensor data
 //! - **Fast encoding**: ~250M inserts/sec single-threaded
 //! - **O(1) append**: Add new readings without re-encoding
-//! - **Lossless**: Perfect reconstruction of all values
+//! - **Configurable intervals**: Timestamps quantized to fixed intervals (default 5 min)
+//!
+//! # Lossy vs Lossless
+//!
+//! The compression is **lossless when there is exactly one reading per interval**.
+//! When multiple readings fall within the same interval, they are **averaged together**,
+//! which is lossy. This is intentional - for sensor data sampled more frequently than
+//! the storage interval, averaging provides a representative value while maintaining
+//! the fixed interval structure.
 //!
 //! # Example
 //! ```
@@ -16,10 +25,10 @@
 //! let mut encoder = Encoder::new();
 //! let base_ts = 1_761_000_000_u64;
 //!
-//! // Append temperature readings (timestamp, temperature)
-//! encoder.append(base_ts, 22);
-//! encoder.append(base_ts + 300, 22);  // 5 minutes later
-//! encoder.append(base_ts + 600, 23);  // temperature changed
+//! // Append sensor readings (timestamp, value)
+//! encoder.append(base_ts, 22).unwrap();
+//! encoder.append(base_ts + 300, 22).unwrap();  // 5 minutes later
+//! encoder.append(base_ts + 600, 23).unwrap();  // value changed
 //!
 //! // Serialize to bytes
 //! let bytes = encoder.to_bytes();
@@ -32,43 +41,137 @@
 //! }
 //! ```
 //!
-//! # Encoding Format
-//!
-//! The format uses variable-length bit codes optimized for the statistical
-//! distribution of temperature deltas:
-//! - 89% of readings have delta=0 (no change) → 1-2 bits
-//! - 10% have delta=±1 → 3 bits
-//! - Remaining deltas use 7-19 bits
+//! # Wire Format
 //!
 //! ## Header (14 bytes)
-//! - `base_ts_offset`: 4 bytes (timestamp - epoch base)
-//! - `duration`: 2 bytes (number of intervals)
-//! - `count`: 2 bytes (number of readings)
-//! - `first_temp`: 4 bytes (first temperature as i32)
-//! - `interval`: 2 bytes (seconds between readings)
+//!
+//! | Offset | Size | Field | Description |
+//! |--------|------|-------|-------------|
+//! | 0 | 4 | `base_ts_offset` | First timestamp minus epoch base (1,760,000,000). Reconstructed as `epoch_base + offset`. |
+//! | 4 | 2 | `duration` | Number of intervals from first to last reading. Metadata for quick time-span queries without decoding. |
+//! | 6 | 2 | `count` | Total number of readings stored. Used by decoder to know when to stop. |
+//! | 8 | 4 | `first_temp` | First value as i32, stored directly (not delta-encoded). |
+//! | 12 | 2 | `interval` | Interval between readings in seconds (1-65535). |
+//!
+//! ## Bit-Packed Data
+//!
+//! After the header, values are stored as variable-length bit-packed deltas:
+//!
+//! | Delta | Encoding | Bits | Description |
+//! |-------|----------|------|-------------|
+//! | 0 | `0` | 1 | Single unchanged value |
+//! | 0 (run) | `110xx` | 5 | 2-5 consecutive unchanged values |
+//! | 0 (run) | `1110xxxx` | 8 | 6-21 consecutive unchanged values |
+//! | 0 (run) | `11110xxxxxxx` | 12 | 22-149 consecutive unchanged values |
+//! | ±1 | `10x` | 3 | x=0 for +1, x=1 for -1 |
+//! | ±2 | `111110x` | 7 | x=0 for +2, x=1 for -2 |
+//! | ±3..±10 | `1111110xxxx` | 11 | 4-bit signed offset from ±3 |
+//! | ±11..±1023 | `11111110xxxxxxxxxxx` | 19 | 11-bit signed value |
+//! | gap | `11111111xxxxxx` | 14 | Skip 1-64 intervals (no data). Larger gaps use multiple markers. |
+//!
+//! # Internal Implementation
+//!
+//! ## Bit Accumulator
+//!
+//! Bits are accumulated in a 64-bit register (`bit_accum`) and flushed to the output
+//! buffer in 8-bit chunks when full. This avoids byte-alignment overhead and allows
+//! efficient variable-length encoding.
+//!
+//! ## Pending State Packing
+//!
+//! To keep the `Encoder` struct compact (72 bytes), multiple values are packed into
+//! a single `u64` field (`pending_state`):
+//! - Bits 0-5: Current bit accumulator count (0-63)
+//! - Bits 6-15: Pending reading count for averaging (0-1023)
+//! - Bits 16-47: Pending sum for averaging (i32 range)
+//!
+//! This allows in-interval averaging without additional struct fields.
+//!
+//! ## Zero-Run Encoding
+//!
+//! Consecutive unchanged values are encoded using run-length encoding with tiered
+//! prefix codes. A single `0` bit means "same as previous". Longer runs use progressively
+//! longer codes to encode the run length, up to 149 values per code. Runs longer than
+//! 149 use multiple codes.
+//!
+//! ## Gap Encoding
+//!
+//! When intervals have no data (sensor offline, gaps in collection), a special 14-bit
+//! gap marker encodes up to 64 skipped intervals. This is more efficient than storing
+//! placeholder values and preserves the actual timing of readings.
 //!
 //! ## Supported Ranges
-//! - Temperature: full i32 range (first temp), ±1024 per delta
-//! - Readings per encoder: up to 65535
-//! - Timestamp intervals: 1-65535 seconds (configurable)
-
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_possible_wrap)]
+//! - Values: full i32 range (first value), ±1023 per delta
+//! - Readings per encoder: up to 65,535
+//! - Readings per interval: up to 1,023 (averaged together)
+//! - Timestamp intervals: 1-65,535 seconds (~18 hours max)
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// Error returned when appending a reading fails
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendError {
+    /// Timestamp is before the base timestamp (first reading's timestamp)
+    TimestampBeforeBase { ts: u64, base_ts: u64 },
+    /// Timestamp would place reading in an earlier interval (out of order)
+    OutOfOrder {
+        ts: u64,
+        logical_idx: u32,
+        prev_logical_idx: u32,
+    },
+    /// Too many readings in the same interval (max 1023)
+    IntervalOverflow { count: u16 },
+    /// Too many total readings (max 65535)
+    CountOverflow,
+    /// Temperature delta exceeds encodable range (must be in [-1024, 1023])
+    DeltaOverflow {
+        delta: i32,
+        prev_temp: i32,
+        new_temp: i32,
+    },
+}
+
+impl fmt::Display for AppendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TimestampBeforeBase { ts, base_ts } => {
+                write!(f, "timestamp {ts} is before base timestamp {base_ts}")
+            }
+            Self::OutOfOrder {
+                ts,
+                logical_idx,
+                prev_logical_idx,
+            } => {
+                write!(
+                    f,
+                    "timestamp {ts} (interval {logical_idx}) is before previous interval {prev_logical_idx}"
+                )
+            }
+            Self::IntervalOverflow { count } => {
+                write!(f, "too many readings in interval ({count}), max is 1023")
+            }
+            Self::CountOverflow => write!(f, "too many total readings, max is 65535"),
+            Self::DeltaOverflow {
+                delta,
+                prev_temp,
+                new_temp,
+            } => {
+                write!(
+                    f,
+                    "temperature delta {delta} ({prev_temp} -> {new_temp}) exceeds range [-1024, 1023]"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for AppendError {}
 
 // Branch hints using #[cold] attribute (stable Rust)
 #[cold]
 #[inline(never)]
-fn cold_sentinel_handler() {}
-
-#[cold]
-#[inline(never)]
 fn cold_gap_handler() {}
-
-/// Sentinel value indicating a sensor disconnect/gap
-pub const SENTINEL_VALUE: i32 = -1000;
 
 /// Base epoch for timestamp compression (reduces storage by ~4 bytes)
 const EPOCH_BASE: u64 = 1_760_000_000;
@@ -82,7 +185,7 @@ const HEADER_SIZE: usize = 14;
 /// Division by interval
 #[inline]
 fn div_by_interval(x: u64, interval: u16) -> u64 {
-    x / interval as u64
+    x / u64::from(interval)
 }
 
 /// Compute average with proper rounding (round half away from zero)
@@ -92,7 +195,7 @@ fn rounded_avg(sum: i32, count: u16) -> i32 {
     if count <= 1 {
         return sum;
     }
-    let c = count as i32;
+    let c = i32::from(count);
     if sum >= 0 {
         (sum + c / 2) / c
     } else {
@@ -100,17 +203,17 @@ fn rounded_avg(sum: i32, count: u16) -> i32 {
     }
 }
 
-/// Pack pending averaging state into pending_state (u64)
+/// Pack pending averaging state into `pending_state` (u64)
 /// - Bits 0-5: actual bit accumulator count (0-63)
-/// - Bits 6-15: pending_count (0-1023)
-/// - Bits 16-47: pending_sum as i32 (32 bits, stored as u32)
+/// - Bits 6-15: `pending_count` (0-1023)
+/// - Bits 16-47: `pending_sum` as i32 (32 bits, stored as u32)
 #[inline]
 fn pack_pending(bits: u32, count: u16, sum: i32) -> u64 {
-    ((sum as u32 as u64) << 16) | ((count as u64 & 0x3FF) << 6) | (bits as u64 & 0x3F)
+    (u64::from(sum as u32) << 16) | ((u64::from(count) & 0x3FF) << 6) | (u64::from(bits) & 0x3F)
 }
 
-/// Unpack pending averaging state from pending_state
-/// Returns (bit_accum_count, pending_count, pending_sum)
+/// Unpack pending averaging state from `pending_state`
+/// Returns (`bit_accum_count`, `pending_count`, `pending_sum`)
 #[inline]
 fn unpack_pending(packed: u64) -> (u32, u16, i32) {
     let bits = (packed & 0x3F) as u32;
@@ -120,7 +223,6 @@ fn unpack_pending(packed: u64) -> (u32, u16, i32) {
 }
 
 // Precomputed delta encoding table: (bits, num_bits) for deltas -10 to +10
-#[allow(clippy::unusual_byte_groupings)]
 const DELTA_ENCODE: [(u32, u8); 21] = [
     (0b1111110_0000, 11), // -10
     (0b1111110_0001, 11), // -9
@@ -155,7 +257,7 @@ pub struct Encoder {
     base_ts: u64,
     last_ts: u64,
     bit_accum: u64,
-    /// Packed state: bits 0-5 = bit_accum_count, bits 6-15 = pending_count (0-1023), bits 16-47 = pending_sum
+    /// Packed state: bits 0-5 = `bit_accum_count`, bits 6-15 = `pending_count` (0-1023), bits 16-47 = `pending_sum`
     pending_state: u64,
     data: Vec<u8>,
     prev_temp: i32,
@@ -205,19 +307,21 @@ impl Encoder {
 
     /// Append a temperature reading
     ///
-    /// Multiple readings in the same 5-minute interval are averaged.
+    /// Multiple readings in the same interval are averaged.
     ///
     /// # Arguments
     /// * `ts` - Unix timestamp in seconds
-    /// * `temperature` - Temperature value (use `SENTINEL_VALUE` for gaps)
+    /// * `temperature` - Temperature value
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Timestamp is before the base timestamp
+    /// - Timestamp is out of order (earlier interval than previous)
+    /// - Too many readings in the same interval (max 1023)
+    /// - Too many total readings (max 65535)
+    /// - Temperature delta exceeds encodable range [-1024, 1023]
     #[inline]
-    pub fn append(&mut self, ts: u64, temperature: i32) {
-        // Skip sentinel values (rare)
-        if temperature == SENTINEL_VALUE {
-            cold_sentinel_handler();
-            return;
-        }
-
+    pub fn append(&mut self, ts: u64, temperature: i32) -> Result<(), AppendError> {
         // First reading - initialize pending state
         if self.count == 0 {
             self.base_ts = ts;
@@ -228,34 +332,62 @@ impl Encoder {
             self.count = 1;
             // Initialize pending: count=1, sum=temperature
             self.pending_state = pack_pending(0, 1, temperature);
-            return;
+            return Ok(());
         }
 
-        // Skip out-of-order readings (ts before base_ts)
+        // Reject out-of-order readings (ts before base_ts)
         if ts < self.base_ts {
-            return;
+            return Err(AppendError::TimestampBeforeBase {
+                ts,
+                base_ts: self.base_ts,
+            });
         }
 
         // Calculate logical index
         let logical_idx = div_by_interval(ts - self.base_ts, self.interval) as u32;
 
-        // Skip readings that go backwards in time
+        // Reject readings that go backwards in time
         if logical_idx < self.prev_logical_idx {
-            return;
+            return Err(AppendError::OutOfOrder {
+                ts,
+                logical_idx,
+                prev_logical_idx: self.prev_logical_idx,
+            });
         }
 
         // Same interval - accumulate for averaging
         if logical_idx == self.prev_logical_idx {
             let (bits, count, sum) = unpack_pending(self.pending_state);
-            if count < 1023 {
-                self.pending_state = pack_pending(bits, count + 1, sum.saturating_add(temperature));
+            if count >= 1023 {
+                return Err(AppendError::IntervalOverflow { count });
             }
-            // If count >= 1023, silently ignore (shouldn't happen in practice)
+            self.pending_state = pack_pending(bits, count + 1, sum.saturating_add(temperature));
             self.last_ts = ts;
-            return;
+            return Ok(());
         }
 
-        // New interval - finalize previous interval's average and encode it
+        // New interval - check for potential errors before committing
+
+        // Check count overflow
+        if self.count == u16::MAX {
+            return Err(AppendError::CountOverflow);
+        }
+
+        // Check delta overflow: compute what the delta would be after finalizing
+        let (_, pending_count, pending_sum) = unpack_pending(self.pending_state);
+        if pending_count > 0 && self.count > 1 {
+            let avg = rounded_avg(pending_sum, pending_count);
+            let delta = avg - self.prev_temp;
+            if !(-1024..=1023).contains(&delta) {
+                return Err(AppendError::DeltaOverflow {
+                    delta,
+                    prev_temp: self.prev_temp,
+                    new_temp: avg,
+                });
+            }
+        }
+
+        // All checks passed - finalize previous interval
         self.finalize_pending_interval();
 
         let index_gap = logical_idx - self.prev_logical_idx;
@@ -267,13 +399,15 @@ impl Encoder {
             self.write_gaps(index_gap - 1);
         }
 
-        // Start accumulating for new interval (don't encode yet - wait for average)
+        // Start accumulating for new interval
         self.prev_logical_idx = logical_idx;
         self.last_ts = ts;
         self.count += 1;
         // Initialize pending for new interval: count=1, sum=temperature
         let (bits, _, _) = unpack_pending(self.pending_state);
         self.pending_state = pack_pending(bits, 1, temperature);
+
+        Ok(())
     }
 
     /// Finalize the pending interval: compute average and encode the delta
@@ -306,7 +440,7 @@ impl Encoder {
 
         // Clear pending state (re-extract bits after any encoding that may have occurred)
         let (bits, _, _) = unpack_pending(self.pending_state);
-        self.pending_state = bits as u64;  // Clear pending count/sum, keep actual bits
+        self.pending_state = u64::from(bits); // Clear pending count/sum, keep actual bits
     }
 
     #[inline]
@@ -322,8 +456,7 @@ impl Encoder {
         // Large delta: must fit in 11-bit signed range [-1024, 1023]
         assert!(
             (-1024..=1023).contains(&delta),
-            "Delta {} out of range [-1024, 1023]. Temperature swings this large are not supported.",
-            delta
+            "Delta {delta} out of range [-1024, 1023]. Temperature swings this large are not supported."
         );
         let bits = (0b1111_1110_u32 << 11) | ((delta as u32) & 0x7FF);
         self.write_bits(bits, 19);
@@ -455,6 +588,14 @@ impl Encoder {
         let mut bits = actual_bits;
         let mut zeros = self.zero_run;
 
+        // Helper to flush complete bytes from accumulator
+        let flush_bytes = |accum: &mut u64, bits: &mut u32, out: &mut Vec<u8>| {
+            while *bits >= 8 {
+                *bits -= 8;
+                out.push((*accum >> *bits) as u8);
+            }
+        };
+
         // For multi-interval encoders, encode the final interval's delta
         if pending_count > 0 {
             let delta = final_avg - self.prev_temp;
@@ -467,11 +608,13 @@ impl Encoder {
                     accum = (accum << n) | u64::from(b);
                     bits += n;
                     zeros -= c;
+                    flush_bytes(&mut accum, &mut bits, &mut final_data);
                 }
                 // Encode the delta
                 let (delta_bits, delta_num_bits) = Self::encode_delta_value(delta);
                 accum = (accum << delta_num_bits) | u64::from(delta_bits);
                 bits += delta_num_bits;
+                flush_bytes(&mut accum, &mut bits, &mut final_data);
             }
         }
 
@@ -481,23 +624,22 @@ impl Encoder {
             accum = (accum << n) | u64::from(b);
             bits += n;
             zeros -= c;
+            flush_bytes(&mut accum, &mut bits, &mut final_data);
         }
 
-        while bits >= 8 {
-            bits -= 8;
-            final_data.push((accum >> bits) as u8);
-        }
+        // Flush any remaining complete bytes
+        flush_bytes(&mut accum, &mut bits, &mut final_data);
 
         if bits > 0 {
             final_data.push((accum << (8 - bits)) as u8);
         }
 
         let mut reader = BitReader::new(&final_data);
-        let mut prev_temp = first_temp;  // Use computed first_temp (may be averaged)
+        let mut prev_temp = first_temp; // Use computed first_temp (may be averaged)
         let mut idx = 1u64;
         let count = self.count as usize;
 
-        let interval = self.interval as u64;
+        let interval = u64::from(self.interval);
         while decoded.len() < count && reader.has_more() {
             if reader.read_bits(1) == 0 {
                 decoded.push(Reading {
@@ -637,6 +779,14 @@ impl Encoder {
         let mut bits = actual_bits;
         let mut zeros = self.zero_run;
 
+        // Helper to flush complete bytes from accumulator
+        let flush_bytes = |accum: &mut u64, bits: &mut u32, out: &mut Vec<u8>| {
+            while *bits >= 8 {
+                *bits -= 8;
+                out.push((*accum >> *bits) as u8);
+            }
+        };
+
         // For multi-interval encoders, encode the final interval's delta
         if self.count > 1 && pending_count > 0 {
             let delta = final_avg - self.prev_temp;
@@ -649,11 +799,13 @@ impl Encoder {
                     accum = (accum << n) | u64::from(b);
                     bits += n;
                     zeros -= c;
+                    flush_bytes(&mut accum, &mut bits, &mut result);
                 }
                 // Encode the delta
                 let (delta_bits, delta_num_bits) = Self::encode_delta_value(delta);
                 accum = (accum << delta_num_bits) | u64::from(delta_bits);
                 bits += delta_num_bits;
+                flush_bytes(&mut accum, &mut bits, &mut result);
             }
         }
 
@@ -663,13 +815,11 @@ impl Encoder {
             accum = (accum << n) | u64::from(b);
             bits += n;
             zeros -= c;
+            flush_bytes(&mut accum, &mut bits, &mut result);
         }
 
-        // Drain complete bytes
-        while bits >= 8 {
-            bits -= 8;
-            result.push((accum >> bits) as u8);
-        }
+        // Flush any remaining complete bytes
+        flush_bytes(&mut accum, &mut bits, &mut result);
 
         // Pad remaining bits
         if bits > 0 {
@@ -679,7 +829,7 @@ impl Encoder {
         result
     }
 
-    /// Encode a delta value, returning (bits, num_bits)
+    /// Encode a delta value, returning (bits, `num_bits`)
     #[inline]
     fn encode_delta_value(delta: i32) -> (u32, u32) {
         let idx = (delta + 10) as usize;
@@ -768,12 +918,9 @@ pub struct Reading {
 /// * `bytes` - Encoded bytes from `Encoder::to_bytes()`
 ///
 /// # Returns
-/// Vector of decoded readings
-///
-/// # Panics
-/// Panics if the byte slice is malformed (e.g., truncated header)
+/// Vector of decoded readings. Returns an empty vector if bytes is too short
+/// (less than 14 bytes) or contains no readings.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn decode(bytes: &[u8]) -> Vec<Reading> {
     if bytes.len() < HEADER_SIZE {
         return Vec::new();
@@ -783,7 +930,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
     let start_ts = EPOCH_BASE + u64::from(base_ts_offset);
     let count = u16::from_le_bytes(bytes[6..8].try_into().unwrap()) as usize;
     let first_temp = i32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    let interval = u16::from_le_bytes(bytes[12..14].try_into().unwrap()) as u64;
+    let interval = u64::from(u16::from_le_bytes(bytes[12..14].try_into().unwrap()));
 
     let mut decoded = Vec::with_capacity(count);
     if count == 0 {
@@ -814,7 +961,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
         }
         if reader.read_bits(1) == 0 {
             // ±1: 10 + sign
-            prev_temp += if reader.read_bits(1) == 0 { 1 } else { -1 };
+            prev_temp = prev_temp.wrapping_add(if reader.read_bits(1) == 0 { 1 } else { -1 });
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
                 temperature: prev_temp,
@@ -866,7 +1013,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
         }
         if reader.read_bits(1) == 0 {
             // ±2: 111110 + sign
-            prev_temp += if reader.read_bits(1) == 0 { 2 } else { -2 };
+            prev_temp = prev_temp.wrapping_add(if reader.read_bits(1) == 0 { 2 } else { -2 });
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
                 temperature: prev_temp,
@@ -877,7 +1024,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
         if reader.read_bits(1) == 0 {
             // ±3-10: 1111110 + 4 bits
             let e = reader.read_bits(4) as i32;
-            prev_temp += if e < 8 { e - 10 } else { e - 5 };
+            prev_temp = prev_temp.wrapping_add(if e < 8 { e - 10 } else { e - 5 });
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
                 temperature: prev_temp,
@@ -888,11 +1035,12 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
         if reader.read_bits(1) == 0 {
             // Large delta: 11111110 + 11 bits signed
             let raw = reader.read_bits(11);
-            prev_temp += if raw & 0x400 != 0 {
+            let delta = if raw & 0x400 != 0 {
                 (raw | 0xFFFF_F800) as i32
             } else {
                 raw as i32
             };
+            prev_temp = prev_temp.wrapping_add(delta);
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
                 temperature: prev_temp,
@@ -970,7 +1118,7 @@ mod tests {
         let temps = [22, 23, 23, 22, 21, 22, 22, 22, 25, 20];
         let mut enc = Encoder::new();
         for (i, &t) in temps.iter().enumerate() {
-            enc.append(base + i as u64 * 300, t);
+            enc.append(base + i as u64 * 300, t).unwrap();
         }
         let dec = enc.decode();
         assert_eq!(dec.len(), temps.len());
@@ -989,7 +1137,7 @@ mod tests {
     #[test]
     fn test_single_reading() {
         let mut enc = Encoder::new();
-        enc.append(1761955455, 22);
+        enc.append(1761955455, 22).unwrap();
         let dec = enc.decode();
         assert_eq!(dec.len(), 1);
         assert_eq!(dec[0].temperature, 22);
@@ -997,16 +1145,18 @@ mod tests {
 
     #[test]
     fn test_gaps() {
+        // Gaps are implicit - just skip intervals by using later timestamps
         let base = 1761955455u64;
         let mut enc = Encoder::new();
-        enc.append(base, 22);
-        enc.append(base + 300, SENTINEL_VALUE);
-        enc.append(base + 600, SENTINEL_VALUE);
-        enc.append(base + 900, 23);
+        enc.append(base, 22).unwrap();
+        // Skip 2 intervals (600 seconds = 2 * 300)
+        enc.append(base + 900, 23).unwrap();
         let dec = enc.decode();
         assert_eq!(dec.len(), 2);
         assert_eq!(dec[0].temperature, 22);
         assert_eq!(dec[1].temperature, 23);
+        // Gap is preserved in timestamps
+        assert_eq!(dec[1].ts - dec[0].ts, 900);
     }
 
     #[test]
@@ -1014,7 +1164,7 @@ mod tests {
         let base = 1761955455u64;
         let mut enc = Encoder::new();
         for i in 0..200 {
-            enc.append(base + i * 300, 22);
+            enc.append(base + i * 300, 22).unwrap();
         }
         let dec = enc.decode();
         assert_eq!(dec.len(), 200);
@@ -1040,7 +1190,7 @@ mod tests {
         temps.push(temp);
 
         for (i, &t) in temps.iter().enumerate() {
-            enc.append(base + i as u64 * 300, t);
+            enc.append(base + i as u64 * 300, t).unwrap();
         }
         let dec = enc.decode();
         assert_eq!(dec.len(), temps.len());
@@ -1057,7 +1207,7 @@ mod tests {
         temps.extend((25..39).rev());
 
         for (i, &t) in temps.iter().enumerate() {
-            enc.append(base + i as u64 * 300, t);
+            enc.append(base + i as u64 * 300, t).unwrap();
         }
 
         let dec = enc.decode();
@@ -1075,7 +1225,7 @@ mod tests {
         let temps: Vec<i32> = (-10..=39).collect();
 
         for (i, &t) in temps.iter().enumerate() {
-            enc.append(base + i as u64 * 300, t);
+            enc.append(base + i as u64 * 300, t).unwrap();
         }
 
         let dec = enc.decode();
@@ -1101,7 +1251,7 @@ mod tests {
             if i == 150 {
                 temp = 22;
             }
-            enc.append(base + i * 300, temp);
+            enc.append(base + i * 300, temp).unwrap();
         }
 
         let bytes = enc.to_bytes();
@@ -1117,7 +1267,7 @@ mod tests {
         let base_ts = 1761955455u64;
 
         for i in 0..10 {
-            encoder.append(base_ts + i * 300, 22);
+            encoder.append(base_ts + i * 300, 22).unwrap();
         }
 
         let decoded = encoder.decode();
@@ -1135,7 +1285,7 @@ mod tests {
         let temps = [22, 23, 22, 21, 22];
 
         for (i, &temp) in temps.iter().enumerate() {
-            encoder.append(base_ts + i as u64 * 300, temp);
+            encoder.append(base_ts + i as u64 * 300, temp).unwrap();
         }
 
         let decoded = encoder.decode();
@@ -1151,9 +1301,9 @@ mod tests {
         let mut encoder = Encoder::new();
         let base_ts = 1761955455u64;
 
-        encoder.append(base_ts, 20);
-        encoder.append(base_ts + 300, 25); // +5
-        encoder.append(base_ts + 600, 20); // -5
+        encoder.append(base_ts, 20).unwrap();
+        encoder.append(base_ts + 300, 25).unwrap(); // +5
+        encoder.append(base_ts + 600, 20).unwrap(); // -5
 
         let decoded = encoder.decode();
 
@@ -1168,9 +1318,9 @@ mod tests {
         let mut encoder = Encoder::new();
         let base_ts = 1761955455u64;
 
-        encoder.append(base_ts, 20);
-        encoder.append(base_ts + 300, 520); // +500
-        encoder.append(base_ts + 600, 20);  // -500
+        encoder.append(base_ts, 20).unwrap();
+        encoder.append(base_ts + 300, 520).unwrap(); // +500
+        encoder.append(base_ts + 600, 20).unwrap(); // -500
 
         let decoded = encoder.decode();
 
@@ -1181,26 +1331,12 @@ mod tests {
     }
 
     #[test]
-    fn test_all_gaps() {
-        let mut encoder = Encoder::new();
-        let base_ts = 1761955455u64;
-
-        for i in 0..5 {
-            encoder.append(base_ts + i * 300, SENTINEL_VALUE);
-        }
-
-        assert_eq!(encoder.count(), 0);
-        let bytes = encoder.to_bytes();
-        assert!(bytes.is_empty());
-    }
-
-    #[test]
     fn test_long_zero_run() {
         let mut encoder = Encoder::new();
         let base_ts = 1761955455u64;
 
         for i in 0..50 {
-            encoder.append(base_ts + i * 300, 22);
+            encoder.append(base_ts + i * 300, 22).unwrap();
         }
 
         let decoded = encoder.decode();
@@ -1224,7 +1360,7 @@ mod tests {
         let mut encoder = Encoder::new();
         for (i, (&temp, &j)) in temps.iter().zip(jitter.iter()).enumerate() {
             let ts = base_ts + (i as u64 * 300) + j;
-            encoder.append(ts, temp);
+            encoder.append(ts, temp).unwrap();
         }
 
         let decoded = encoder.decode();
@@ -1266,7 +1402,7 @@ mod tests {
         let mut encoder = Encoder::new();
         for (i, (&temp, &j)) in temps.iter().zip(jitter.iter()).enumerate() {
             let ts = (base_ts as i64 + (i as i64 * 300) + j) as u64;
-            encoder.append(ts, temp);
+            encoder.append(ts, temp).unwrap();
         }
 
         let decoded = encoder.decode();
@@ -1313,7 +1449,7 @@ mod tests {
 
         let mut encoder = Encoder::new();
         for (ts, temp) in inputs {
-            encoder.append(ts, temp);
+            encoder.append(ts, temp).unwrap();
         }
 
         let decoded = encoder.decode();
@@ -1359,15 +1495,32 @@ mod tests {
     }
 
     #[test]
-    fn test_out_of_order_readings_skipped() {
+    fn test_out_of_order_readings_return_error() {
         let base_ts = 1761955455u64;
         let mut encoder = Encoder::new();
 
-        // Readings arrive out of order - out-of-order ones are skipped
-        encoder.append(base_ts + 600, 24); // base_ts is set to base_ts + 600
-        encoder.append(base_ts, 22);       // Skipped: ts < base_ts
-        encoder.append(base_ts + 300, 23); // Skipped: logical_idx < prev_logical_idx
-        encoder.append(base_ts + 900, 25); // Accepted: logical_idx > prev_logical_idx
+        // First reading sets base_ts
+        encoder.append(base_ts + 600, 24).unwrap(); // base_ts is set to base_ts + 600
+        let actual_base = base_ts + 600;
+
+        // Out-of-order readings return errors
+        assert_eq!(
+            encoder.append(base_ts, 22),
+            Err(AppendError::TimestampBeforeBase {
+                ts: base_ts,
+                base_ts: actual_base
+            })
+        );
+        assert_eq!(
+            encoder.append(base_ts + 300, 23),
+            Err(AppendError::TimestampBeforeBase {
+                ts: base_ts + 300,
+                base_ts: actual_base
+            })
+        );
+
+        // Reading at a later interval is accepted
+        encoder.append(base_ts + 900, 25).unwrap();
 
         let decoded = encoder.decode();
 
@@ -1377,26 +1530,44 @@ mod tests {
     }
 
     #[test]
-    fn test_reading_before_base_ts_skipped() {
+    fn test_reading_before_base_ts_returns_error() {
         let base_ts = 1761955455u64;
         let mut encoder = Encoder::new();
 
         // First reading establishes base_ts
-        encoder.append(base_ts, 22);
+        encoder.append(base_ts, 22).unwrap();
         assert_eq!(encoder.count(), 1);
 
-        // Reading before base_ts should be silently skipped
-        encoder.append(base_ts - 1, 99);
+        // Reading before base_ts should return TimestampBeforeBase error
+        assert_eq!(
+            encoder.append(base_ts - 1, 99),
+            Err(AppendError::TimestampBeforeBase {
+                ts: base_ts - 1,
+                base_ts
+            })
+        );
         assert_eq!(encoder.count(), 1);
 
-        encoder.append(base_ts - 100, 99);
+        assert_eq!(
+            encoder.append(base_ts - 100, 99),
+            Err(AppendError::TimestampBeforeBase {
+                ts: base_ts - 100,
+                base_ts
+            })
+        );
         assert_eq!(encoder.count(), 1);
 
-        encoder.append(base_ts - 300, 99);
+        assert_eq!(
+            encoder.append(base_ts - 300, 99),
+            Err(AppendError::TimestampBeforeBase {
+                ts: base_ts - 300,
+                base_ts
+            })
+        );
         assert_eq!(encoder.count(), 1);
 
         // Reading at or after base_ts should be accepted
-        encoder.append(base_ts + 300, 23);
+        encoder.append(base_ts + 300, 23).unwrap();
         assert_eq!(encoder.count(), 2);
 
         let decoded = encoder.decode();
@@ -1413,7 +1584,7 @@ mod tests {
 
         // Timestamp before EPOCH_BASE (1_760_000_000)
         let old_ts = EPOCH_BASE - 1000;
-        encoder.append(old_ts, 22);
+        encoder.append(old_ts, 22).unwrap();
 
         // The encoder accepts it as first reading (base_ts = old_ts)
         assert_eq!(encoder.count(), 1);
@@ -1421,9 +1592,7 @@ mod tests {
         // But to_bytes() would underflow when computing base_ts - EPOCH_BASE
         // This is a known limitation: timestamps must be >= EPOCH_BASE
         // For now, we document that this panics
-        let result = std::panic::catch_unwind(|| {
-            encoder.to_bytes()
-        });
+        let result = std::panic::catch_unwind(|| encoder.to_bytes());
         assert!(result.is_err(), "Expected panic when ts < EPOCH_BASE");
     }
 
@@ -1435,13 +1604,13 @@ mod tests {
 
         // Single reading
         let mut enc = Encoder::new();
-        enc.append(1761955455, 22);
+        enc.append(1761955455, 22).unwrap();
         assert_eq!(enc.size(), enc.to_bytes().len());
 
         // Multiple readings with zero deltas (tests zero_run estimation)
         let mut enc = Encoder::new();
         for i in 0..10 {
-            enc.append(1761955455 + i * 300, 22);
+            enc.append(1761955455 + i * 300, 22).unwrap();
         }
         assert_eq!(enc.size(), enc.to_bytes().len());
 
@@ -1449,14 +1618,14 @@ mod tests {
         let mut enc = Encoder::new();
         let temps = [22, 23, 21, 25, 20, 30, 15];
         for (i, &t) in temps.iter().enumerate() {
-            enc.append(1761955455 + i as u64 * 300, t);
+            enc.append(1761955455 + i as u64 * 300, t).unwrap();
         }
         assert_eq!(enc.size(), enc.to_bytes().len());
 
         // Long zero run (tests zero_run > 149)
         let mut enc = Encoder::new();
         for i in 0..200 {
-            enc.append(1761955455 + i * 300, 22);
+            enc.append(1761955455 + i * 300, 22).unwrap();
         }
         assert_eq!(enc.size(), enc.to_bytes().len());
 
@@ -1464,7 +1633,7 @@ mod tests {
         let mut enc = Encoder::new();
         for i in 0..50 {
             let temp = if i % 10 == 0 { 25 } else { 22 };
-            enc.append(1761955455 + i * 300, temp);
+            enc.append(1761955455 + i * 300, temp).unwrap();
         }
         assert_eq!(enc.size(), enc.to_bytes().len());
     }
@@ -1486,11 +1655,11 @@ mod tests {
         let mut next_temp_delta = || {
             temp_seed = temp_seed.wrapping_mul(1103515245).wrapping_add(12345);
             match temp_seed % 10 {
-                0 => 1,       // 10% chance +1
-                1 => -1,      // 10% chance -1
-                2 => 2,       // 10% chance +2
-                3 => -2,      // 10% chance -2
-                _ => 0,       // 60% chance no change
+                0 => 1,  // 10% chance +1
+                1 => -1, // 10% chance -1
+                2 => 2,  // 10% chance +2
+                3 => -2, // 10% chance -2
+                _ => 0,  // 60% chance no change
             }
         };
 
@@ -1514,7 +1683,7 @@ mod tests {
                 prev_logical_idx = logical_idx;
             }
 
-            enc.append(ts, temp);
+            enc.append(ts, temp).unwrap();
 
             // Assert size matches actual encoded size after each append
             let actual_size = enc.to_bytes().len();
@@ -1535,7 +1704,7 @@ mod tests {
 
         // Constant temperature - maximum compression via zero runs
         for i in 0..300 {
-            enc.append(base_ts + i * 300, 22);
+            enc.append(base_ts + i * 300, 22).unwrap();
 
             let actual_size = enc.to_bytes().len();
             let estimated_size = enc.size();
@@ -1556,7 +1725,7 @@ mod tests {
         // Alternating temperature - no zero runs, all ±1 deltas
         for i in 0..300 {
             let temp = if i % 2 == 0 { 22 } else { 23 };
-            enc.append(base_ts + i * 300, temp);
+            enc.append(base_ts + i * 300, temp).unwrap();
 
             let actual_size = enc.to_bytes().len();
             let estimated_size = enc.size();
@@ -1577,7 +1746,7 @@ mod tests {
         // Large temperature swings - tests large delta encoding
         for i in 0..300 {
             let temp = if i % 2 == 0 { 0 } else { 100 };
-            enc.append(base_ts + i * 300, temp);
+            enc.append(base_ts + i * 300, temp).unwrap();
 
             let actual_size = enc.to_bytes().len();
             let estimated_size = enc.size();
@@ -1591,42 +1760,59 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_day_events_skipped() {
+    fn test_duplicate_day_events_return_error() {
         let base_ts = 1761955455u64;
         let mut encoder = Encoder::new();
 
         // Append a full day of events (288 readings at 5-min intervals)
         for i in 0..288 {
-            encoder.append(base_ts + i * 300, 22);
+            encoder.append(base_ts + i * 300, 22).unwrap();
         }
         assert_eq!(encoder.count(), 288);
 
-        // Append the same day again
-        for i in 0..288 {
-            encoder.append(base_ts + i * 300, 22);
+        // Trying to append the same day again returns OutOfOrder errors
+        // (because they're in earlier intervals than the last one)
+        for i in 0..287 {
+            let result = encoder.append(base_ts + i * 300, 22);
+            assert!(
+                matches!(result, Err(AppendError::OutOfOrder { .. })),
+                "Expected OutOfOrder error for i={}",
+                i
+            );
         }
 
-        // Should still be 288, not 576
+        // The last one (i=287) would be in the same interval as current, so it's allowed
+        // (same interval = averaging)
+        encoder.append(base_ts + 287 * 300, 22).unwrap();
+
+        // Should still be 288 (the extra one was averaged into the last interval)
         assert_eq!(encoder.count(), 288);
     }
 
     #[test]
-    fn test_duplicate_day_events_with_different_timestamps_skipped() {
+    fn test_duplicate_day_events_with_different_timestamps_return_error() {
         let base_ts = 1761955455u64;
         let mut encoder = Encoder::new();
 
-        // Append 576 events with unique timestamps, but they should all
-        // fall into 288 logical slots (2 events per 300-second interval)
-        for i in 0..576 {
-            // First 288 events at start of each interval
-            // Next 288 events at 150 seconds into each interval
-            let slot = i % 288;
-            let offset = if i < 288 { 0 } else { 150 };
-            let ts = base_ts + slot * 300 + offset;
-            encoder.append(ts, 22);
+        // First pass: 288 events at start of each interval
+        for i in 0..288 {
+            encoder.append(base_ts + i * 300, 22).unwrap();
+        }
+        assert_eq!(encoder.count(), 288);
+
+        // Second pass: trying to go back in time returns OutOfOrder errors
+        for i in 0..287 {
+            let ts = base_ts + i * 300 + 150; // 150 seconds into each interval
+            let result = encoder.append(ts, 22);
+            assert!(
+                matches!(result, Err(AppendError::OutOfOrder { .. })),
+                "Expected OutOfOrder error for i={}",
+                i
+            );
         }
 
-        // Should be 288, not 576 - duplicates within same slot are skipped
+        // Last interval (i=287) is current, so adding to it works
+        encoder.append(base_ts + 287 * 300 + 150, 22).unwrap();
         assert_eq!(encoder.count(), 288);
     }
 
@@ -1635,10 +1821,10 @@ mod tests {
         let base_ts = 1761955455u64;
         let mut encoder = Encoder::new();
 
-        encoder.append(base_ts, 22);
-        encoder.append(base_ts, 23);       // Same interval - will be averaged
-        encoder.append(base_ts + 5, 24);   // Same logical index (within same 300s interval)
-        encoder.append(base_ts + 300, 25); // Next interval
+        encoder.append(base_ts, 22).unwrap();
+        encoder.append(base_ts, 23).unwrap(); // Same interval - will be averaged
+        encoder.append(base_ts + 5, 24).unwrap(); // Same logical index (within same 300s interval)
+        encoder.append(base_ts + 300, 25).unwrap(); // Next interval
 
         let decoded = encoder.decode();
 
@@ -1654,40 +1840,40 @@ mod tests {
 
         // Test case: 22 + 23 = 45, (45 + 1) / 2 = 23 (rounds up)
         let mut encoder = Encoder::new();
-        encoder.append(base_ts, 22);
-        encoder.append(base_ts + 1, 23);
+        encoder.append(base_ts, 22).unwrap();
+        encoder.append(base_ts + 1, 23).unwrap();
         let decoded = encoder.decode();
         assert_eq!(decoded[0].temperature, 23);
 
         // Test case: 22 + 22 + 23 = 67, (67 + 1) / 3 = 22 (rounds down)
         let mut encoder = Encoder::new();
-        encoder.append(base_ts, 22);
-        encoder.append(base_ts + 1, 22);
-        encoder.append(base_ts + 2, 23);
+        encoder.append(base_ts, 22).unwrap();
+        encoder.append(base_ts + 1, 22).unwrap();
+        encoder.append(base_ts + 2, 23).unwrap();
         let decoded = encoder.decode();
         assert_eq!(decoded[0].temperature, 22);
 
         // Test case: 20 + 21 + 22 + 23 = 86, (86 + 2) / 4 = 22
         let mut encoder = Encoder::new();
-        encoder.append(base_ts, 20);
-        encoder.append(base_ts + 1, 21);
-        encoder.append(base_ts + 2, 22);
-        encoder.append(base_ts + 3, 23);
+        encoder.append(base_ts, 20).unwrap();
+        encoder.append(base_ts + 1, 21).unwrap();
+        encoder.append(base_ts + 2, 22).unwrap();
+        encoder.append(base_ts + 3, 23).unwrap();
         let decoded = encoder.decode();
         assert_eq!(decoded[0].temperature, 22);
 
         // Test case: negative temperatures - (-16) + (-16) = -32, (-32 - 1) / 2 = -16
         // This tests that rounding works correctly for negative numbers
         let mut encoder = Encoder::new();
-        encoder.append(base_ts, -16);
-        encoder.append(base_ts + 1, -16);
+        encoder.append(base_ts, -16).unwrap();
+        encoder.append(base_ts + 1, -16).unwrap();
         let decoded = encoder.decode();
         assert_eq!(decoded[0].temperature, -16);
 
         // Test case: negative with rounding - (-15) + (-16) = -31, (-31 - 1) / 2 = -16
         let mut encoder = Encoder::new();
-        encoder.append(base_ts, -15);
-        encoder.append(base_ts + 1, -16);
+        encoder.append(base_ts, -15).unwrap();
+        encoder.append(base_ts + 1, -16).unwrap();
         let decoded = encoder.decode();
         assert_eq!(decoded[0].temperature, -16); // rounds away from zero
     }
@@ -1704,23 +1890,46 @@ mod tests {
             // 2 readings per 300s interval: readings 0,1 in interval 0, 2,3 in interval 1, etc.
             let interval = i / 2;
             let offset_within_interval = (i % 2) * 150; // 0 or 150 seconds
-            encoder.append(base_ts + (interval as u64) * 300 + offset_within_interval as u64, temp);
+            encoder
+                .append(
+                    base_ts + (interval as u64) * 300 + offset_within_interval as u64,
+                    temp,
+                )
+                .unwrap();
         }
 
         let decoded = encoder.decode();
 
         // Should be 5 readings, all with averaged value 23
-        assert_eq!(decoded.len(), 5, "expected 5 averaged readings, got {}", decoded.len());
+        assert_eq!(
+            decoded.len(),
+            5,
+            "expected 5 averaged readings, got {}",
+            decoded.len()
+        );
         for (i, reading) in decoded.iter().enumerate() {
-            assert_eq!(reading.temperature, 23, "expected temp 23 at index {}, got {}", i, reading.temperature);
-            assert_eq!(reading.ts, base_ts + (i as u64) * 300, "wrong timestamp at index {}", i);
+            assert_eq!(
+                reading.temperature, 23,
+                "expected temp 23 at index {}, got {}",
+                i, reading.temperature
+            );
+            assert_eq!(
+                reading.ts,
+                base_ts + (i as u64) * 300,
+                "wrong timestamp at index {}",
+                i
+            );
         }
 
         // Size should be minimal: header (14 bytes) + zero-run encoding for 4 repeated values
         // First temp (23) is in header, then 4 zeros encoded as single zero-run
         // Zero run of 4 uses 5-bit encoding: 110xx (5 bits) = 1 byte when padded
         let size = encoder.size();
-        assert_eq!(size, 15, "expected size of 15 bytes (header + 1 byte zero-run), got {}", size);
+        assert_eq!(
+            size, 15,
+            "expected size of 15 bytes (header + 1 byte zero-run), got {}",
+            size
+        );
     }
 
     #[test]
@@ -1731,9 +1940,9 @@ mod tests {
         let mut enc = Encoder::with_interval(60);
         assert_eq!(enc.interval(), 60);
 
-        enc.append(base_ts, 22);
-        enc.append(base_ts + 60, 23);
-        enc.append(base_ts + 120, 24);
+        enc.append(base_ts, 22).unwrap();
+        enc.append(base_ts + 60, 23).unwrap();
+        enc.append(base_ts + 120, 24).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 3);
@@ -1759,12 +1968,12 @@ mod tests {
         let mut enc = Encoder::with_interval(60);
 
         // Two readings in same 60-second interval
-        enc.append(base_ts, 20);
-        enc.append(base_ts + 30, 24);  // Same interval, should average to 22
+        enc.append(base_ts, 20).unwrap();
+        enc.append(base_ts + 30, 24).unwrap(); // Same interval, should average to 22
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].temperature, 22);  // (20 + 24) / 2 = 22
+        assert_eq!(decoded[0].temperature, 22); // (20 + 24) / 2 = 22
     }
 
     #[test]
@@ -1775,7 +1984,7 @@ mod tests {
 
         let temps = [22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
         for (i, &temp) in temps.iter().enumerate() {
-            enc.append(base_ts + (i as u64) * 300, temp);
+            enc.append(base_ts + (i as u64) * 300, temp).unwrap();
         }
 
         let decoded = enc.decode();
@@ -1797,7 +2006,7 @@ mod tests {
 
         for i in 0..65535u64 {
             let temp = ((i % 20) as i32) + 15; // Temps 15-34
-            enc.append(base_ts + i * 300, temp);
+            enc.append(base_ts + i * 300, temp).unwrap();
         }
 
         assert_eq!(enc.count(), 65535);
@@ -1820,7 +2029,7 @@ mod tests {
 
         // Fill to max
         for i in 0..65535u64 {
-            enc.append(base_ts + i * 300, 22);
+            enc.append(base_ts + i * 300, 22).unwrap();
         }
         assert_eq!(enc.count(), 65535);
 
@@ -1828,7 +2037,7 @@ mod tests {
         // In release mode it would wrap to 0, causing corruption
         // This test documents that 65535 is the hard limit
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            enc.append(base_ts + 65535 * 300, 23);
+            enc.append(base_ts + 65535 * 300, 23).unwrap();
         }));
         // In debug mode, this panics; in release mode, it may not
         // Either way, we verify the encoder has 65535 readings
@@ -1849,26 +2058,25 @@ mod tests {
 
         // Test large negative first_temp (within ±1M for averaging)
         let mut enc = Encoder::new();
-        enc.append(base_ts, -500_000);
-        enc.append(base_ts + 300, -499_500); // delta = +500
+        enc.append(base_ts, -500_000).unwrap();
+        enc.append(base_ts + 300, -499_500).unwrap(); // delta = +500
         let decoded = enc.decode();
         assert_eq!(decoded[0].temperature, -500_000);
         assert_eq!(decoded[1].temperature, -499_500);
 
         // Test large positive first_temp
         let mut enc = Encoder::new();
-        enc.append(base_ts, 500_000);
-        enc.append(base_ts + 300, 500_500); // delta = +500
+        enc.append(base_ts, 500_000).unwrap();
+        enc.append(base_ts + 300, 500_500).unwrap(); // delta = +500
         let decoded = enc.decode();
         assert_eq!(decoded[0].temperature, 500_000);
         assert_eq!(decoded[1].temperature, 500_500);
 
         // Test a sequence with various temps, all within ±1024 delta of each other
-        // Note: avoid -1000 as it's the SENTINEL_VALUE for gaps
         let mut enc = Encoder::new();
-        let temps = [-999, -500, 0, 500, 999, 500, 0, -500, -999];
+        let temps = [-1000, -500, 0, 500, 1000, 500, 0, -500, -1000];
         for (i, &temp) in temps.iter().enumerate() {
-            enc.append(base_ts + (i as u64) * 300, temp);
+            enc.append(base_ts + (i as u64) * 300, temp).unwrap();
         }
 
         let decoded = enc.decode();
@@ -1883,9 +2091,9 @@ mod tests {
 
         // Test maximum delta range (±1023, since ±1024 is the limit)
         let mut enc2 = Encoder::new();
-        enc2.append(base_ts, 0);
-        enc2.append(base_ts + 300, 1023);  // delta = +1023
-        enc2.append(base_ts + 600, 0);     // delta = -1023
+        enc2.append(base_ts, 0).unwrap();
+        enc2.append(base_ts + 300, 1023).unwrap(); // delta = +1023
+        enc2.append(base_ts + 600, 0).unwrap(); // delta = -1023
 
         let decoded2 = enc2.decode();
         assert_eq!(decoded2[0].temperature, 0);
@@ -1894,8 +2102,8 @@ mod tests {
 
         // Verify roundtrip via bytes works for large temperatures
         let mut enc3 = Encoder::new();
-        enc3.append(base_ts, 100_000);
-        enc3.append(base_ts + 300, 100_500);
+        enc3.append(base_ts, 100_000).unwrap();
+        enc3.append(base_ts + 300, 100_500).unwrap();
         let bytes = enc3.to_bytes();
         let decoded3 = decode(&bytes);
         assert_eq!(decoded3[0].temperature, 100_000);
@@ -1909,7 +2117,7 @@ mod tests {
         let mut enc = Encoder::with_interval(1);
 
         for i in 0..100u64 {
-            enc.append(base_ts + i, 22 + (i % 5) as i32);
+            enc.append(base_ts + i, 22 + (i % 5) as i32).unwrap();
         }
 
         let decoded = enc.decode();
@@ -1927,9 +2135,9 @@ mod tests {
         let base_ts = 1761955455u64;
         let mut enc = Encoder::with_interval(65535);
 
-        enc.append(base_ts, 22);
-        enc.append(base_ts + 65535, 23);
-        enc.append(base_ts + 65535 * 2, 24);
+        enc.append(base_ts, 22).unwrap();
+        enc.append(base_ts + 65535, 23).unwrap();
+        enc.append(base_ts + 65535 * 2, 24).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 3);
@@ -1949,49 +2157,49 @@ mod tests {
 
         // Test exactly 1 zero (single zero encoding)
         let mut enc = Encoder::new();
-        enc.append(base_ts, 22);
-        enc.append(base_ts + 300, 22);  // 1 zero delta
-        enc.append(base_ts + 600, 23);
+        enc.append(base_ts, 22).unwrap();
+        enc.append(base_ts + 300, 22).unwrap(); // 1 zero delta
+        enc.append(base_ts + 600, 23).unwrap();
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 3);
 
         // Test exactly 5 zeros (boundary of 2-5 tier)
         let mut enc = Encoder::new();
-        enc.append(base_ts, 22);
+        enc.append(base_ts, 22).unwrap();
         for i in 1..=5 {
-            enc.append(base_ts + i * 300, 22);  // 5 zeros
+            enc.append(base_ts + i * 300, 22).unwrap(); // 5 zeros
         }
-        enc.append(base_ts + 6 * 300, 23);
+        enc.append(base_ts + 6 * 300, 23).unwrap();
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 7);
 
         // Test exactly 21 zeros (boundary of 6-21 tier)
         let mut enc = Encoder::new();
-        enc.append(base_ts, 22);
+        enc.append(base_ts, 22).unwrap();
         for i in 1..=21 {
-            enc.append(base_ts + i * 300, 22);  // 21 zeros
+            enc.append(base_ts + i * 300, 22).unwrap(); // 21 zeros
         }
-        enc.append(base_ts + 22 * 300, 23);
+        enc.append(base_ts + 22 * 300, 23).unwrap();
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 23);
 
         // Test exactly 149 zeros (boundary of 22-149 tier)
         let mut enc = Encoder::new();
-        enc.append(base_ts, 22);
+        enc.append(base_ts, 22).unwrap();
         for i in 1..=149 {
-            enc.append(base_ts + i * 300, 22);  // 149 zeros
+            enc.append(base_ts + i * 300, 22).unwrap(); // 149 zeros
         }
-        enc.append(base_ts + 150 * 300, 23);
+        enc.append(base_ts + 150 * 300, 23).unwrap();
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 151);
 
         // Test 150 zeros (exceeds single run, needs 2 encodings)
         let mut enc = Encoder::new();
-        enc.append(base_ts, 22);
+        enc.append(base_ts, 22).unwrap();
         for i in 1..=150 {
-            enc.append(base_ts + i * 300, 22);  // 150 zeros
+            enc.append(base_ts + i * 300, 22).unwrap(); // 150 zeros
         }
-        enc.append(base_ts + 151 * 300, 23);
+        enc.append(base_ts + 151 * 300, 23).unwrap();
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 152);
     }
@@ -1999,13 +2207,13 @@ mod tests {
     #[test]
     fn test_gap_encoding_boundaries() {
         // Gap marker: 11111111 + 6 bits = up to 64 gaps per marker
+        // Gaps are implicit from timestamp jumps
         let base_ts = 1761955455u64;
 
         // Test gap of exactly 64 intervals (max per single marker)
         let mut enc = Encoder::new();
-        enc.append(base_ts, 22);
-        enc.append(base_ts + 64 * 300, SENTINEL_VALUE); // gap marker
-        enc.append(base_ts + 65 * 300, 23);
+        enc.append(base_ts, 22).unwrap();
+        enc.append(base_ts + 65 * 300, 23).unwrap(); // Skip 64 intervals
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2014,11 +2222,8 @@ mod tests {
 
         // Test gap of 65 (requires 2 gap markers: 64 + 1)
         let mut enc = Encoder::new();
-        enc.append(base_ts, 22);
-        for i in 1..=65 {
-            enc.append(base_ts + i * 300, SENTINEL_VALUE);
-        }
-        enc.append(base_ts + 66 * 300, 23);
+        enc.append(base_ts, 22).unwrap();
+        enc.append(base_ts + 66 * 300, 23).unwrap(); // Skip 65 intervals
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2026,11 +2231,8 @@ mod tests {
 
         // Test gap of 128 (requires 2 gap markers: 64 + 64)
         let mut enc = Encoder::new();
-        enc.append(base_ts, 22);
-        for i in 1..=128 {
-            enc.append(base_ts + i * 300, SENTINEL_VALUE);
-        }
-        enc.append(base_ts + 129 * 300, 24);
+        enc.append(base_ts, 22).unwrap();
+        enc.append(base_ts + 129 * 300, 24).unwrap(); // Skip 128 intervals
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2045,12 +2247,12 @@ mod tests {
         let base_ts = EPOCH_BASE + 1_000_000; // Well after epoch base
         let mut enc = Encoder::new();
 
-        enc.append(base_ts, 22);
+        enc.append(base_ts, 22).unwrap();
 
         // Use offset that's multiple of interval and reasonable for gap encoding
         // 1000 intervals * 300s = 300,000 seconds (~3.5 days)
         let large_offset = 1000u64 * 300;
-        enc.append(base_ts + large_offset, 23);
+        enc.append(base_ts + large_offset, 23).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2083,7 +2285,7 @@ mod tests {
         header[11] = 0;
         // interval = 300 as u16 little-endian (bytes 12-13)
         header[12] = 44; // 300 low byte
-        header[13] = 1;  // 300 high byte
+        header[13] = 1; // 300 high byte
         let decoded = decode(&header);
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].temperature, 22);
@@ -2093,8 +2295,8 @@ mod tests {
     fn test_decode_corrupted_count() {
         // count field larger than actual data - should not panic
         let mut enc = Encoder::new();
-        enc.append(1761955455, 22);
-        enc.append(1761955455 + 300, 23);
+        enc.append(1761955455, 22).unwrap();
+        enc.append(1761955455 + 300, 23).unwrap();
 
         let mut bytes = enc.to_bytes();
 
@@ -2137,11 +2339,11 @@ mod tests {
 
         // 31 readings in same interval
         for i in 0..31 {
-            enc.append(base_ts + i * 5, 20 + (i as i32 % 10)); // Temps 20-29
+            enc.append(base_ts + i * 5, 20 + (i as i32 % 10)).unwrap(); // Temps 20-29
         }
 
         // Move to next interval
-        enc.append(base_ts + 300, 25);
+        enc.append(base_ts + 300, 25).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2161,11 +2363,11 @@ mod tests {
 
         // 32 readings in same interval
         for i in 0..32 {
-            enc.append(base_ts + i * 5, 20);
+            enc.append(base_ts + i * 5, 20).unwrap();
         }
 
         // Move to next interval
-        enc.append(base_ts + 300, 25);
+        enc.append(base_ts + 300, 25).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2182,11 +2384,11 @@ mod tests {
         // 100 readings in same interval, alternating 20 and 30
         for i in 0..100 {
             let temp = if i % 2 == 0 { 20 } else { 30 };
-            enc.append(base_ts + i, temp);
+            enc.append(base_ts + i, temp).unwrap();
         }
 
         // Move to next interval
-        enc.append(base_ts + 300, 25);
+        enc.append(base_ts + 300, 25).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2202,11 +2404,11 @@ mod tests {
 
         // 500 readings in same interval
         for i in 0..500 {
-            enc.append(base_ts + i, 22);
+            enc.append(base_ts + i, 22).unwrap();
         }
 
         // Move to next interval
-        enc.append(base_ts + 300, 25);
+        enc.append(base_ts + 300, 25).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2222,11 +2424,11 @@ mod tests {
 
         // 1023 readings in same interval (all within first 1023 seconds)
         for i in 0..1023 {
-            enc.append(base_ts + i, 20 + (i as i32 % 10)); // Temps 20-29
+            enc.append(base_ts + i, 20 + (i as i32 % 10)).unwrap(); // Temps 20-29
         }
 
         // Move to next interval
-        enc.append(base_ts + 2000, 25);
+        enc.append(base_ts + 2000, 25).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2239,23 +2441,26 @@ mod tests {
 
     #[test]
     fn test_1024_readings_same_interval() {
-        // 1024 readings exceeds pending_count max of 1023 - 1024th should be ignored
+        // 1024 readings exceeds pending_count max of 1023 - 1024th should return error
         let base_ts = 1761955455u64;
         let mut enc = Encoder::with_interval(2000); // 2000 second interval
 
-        // 1023 readings in same interval
+        // 1023 readings in same interval (max allowed)
         for i in 0..1023 {
-            enc.append(base_ts + i, 20);
+            enc.append(base_ts + i, 20).unwrap();
         }
-        // This 1024th reading should be silently ignored (count already at 1023)
-        enc.append(base_ts + 1023, 100);
+        // This 1024th reading should return IntervalOverflow error
+        assert!(matches!(
+            enc.append(base_ts + 1023, 100),
+            Err(AppendError::IntervalOverflow { count: 1023 })
+        ));
 
-        // Move to next interval
-        enc.append(base_ts + 2000, 25);
+        // Move to next interval - should work since previous was rejected
+        enc.append(base_ts + 2000, 25).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
-        // Average should be 20, not influenced by the ignored 100
+        // Average should be 20, the rejected 100 was not included
         assert_eq!(decoded[0].temperature, 20);
     }
 
@@ -2267,10 +2472,10 @@ mod tests {
 
         // 500 readings of temperature 500 (sum = 250,000)
         for i in 0..500 {
-            enc.append(base_ts + i, 500);
+            enc.append(base_ts + i, 500).unwrap();
         }
 
-        enc.append(base_ts + 300, 25);
+        enc.append(base_ts + 300, 25).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2285,10 +2490,10 @@ mod tests {
 
         // 500 readings of temperature -500 (sum = -250,000)
         for i in 0..500 {
-            enc.append(base_ts + i, -500);
+            enc.append(base_ts + i, -500).unwrap();
         }
 
-        enc.append(base_ts + 300, 25);
+        enc.append(base_ts + 300, 25).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2304,10 +2509,10 @@ mod tests {
         // 400 readings: alternating -100 and +100
         for i in 0..400 {
             let temp = if i % 2 == 0 { -100 } else { 100 };
-            enc.append(base_ts + i, temp);
+            enc.append(base_ts + i, temp).unwrap();
         }
 
-        enc.append(base_ts + 300, 25);
+        enc.append(base_ts + 300, 25).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2322,9 +2527,9 @@ mod tests {
         let mut enc = Encoder::new();
 
         // -10 and +10 average to 0
-        enc.append(base_ts, -10);
-        enc.append(base_ts + 1, 10);
-        enc.append(base_ts + 300, 25);
+        enc.append(base_ts, -10).unwrap();
+        enc.append(base_ts + 1, 10).unwrap();
+        enc.append(base_ts + 300, 25).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2332,11 +2537,11 @@ mod tests {
 
         // -50, -30, +40, +40 = sum 0, avg 0
         let mut enc = Encoder::new();
-        enc.append(base_ts, -50);
-        enc.append(base_ts + 1, -30);
-        enc.append(base_ts + 2, 40);
-        enc.append(base_ts + 3, 40);
-        enc.append(base_ts + 300, 25);
+        enc.append(base_ts, -50).unwrap();
+        enc.append(base_ts + 1, -30).unwrap();
+        enc.append(base_ts + 2, 40).unwrap();
+        enc.append(base_ts + 3, 40).unwrap();
+        enc.append(base_ts + 300, 25).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2344,110 +2549,88 @@ mod tests {
     }
 
     #[test]
-    fn test_delta_overflow_panics() {
-        // Delta > 1023 or < -1024 should panic when encoding during interval crossing
-        // Note: Panic happens in encode_delta during finalize_pending_interval,
+    fn test_delta_overflow_returns_error() {
+        // Delta > 1023 or < -1024 should return DeltaOverflow error
+        // Note: Error is returned during finalize_pending_interval,
         // which is called when crossing from one interval to another.
         // We need at least 4 intervals to trigger this:
         // - interval 0: establishes base
         // - interval 1: first delta (from interval 0)
         // - interval 2: large temp that will overflow
-        // - interval 3: triggers finalize of interval 2, causing panic
+        // - interval 3: triggers finalize of interval 2, returning error
         let base_ts = 1761955455u64;
 
         // Test positive delta overflow: 0 to 2000 = delta of +2000 (out of range)
-        let result = std::panic::catch_unwind(|| {
-            let mut enc = Encoder::new();
-            enc.append(base_ts, 0);         // interval 0
-            enc.append(base_ts + 300, 0);   // interval 1
-            enc.append(base_ts + 600, 2000); // interval 2: temp=2000
-            enc.append(base_ts + 900, 0);   // interval 3: triggers finalize(2), delta=2000
-        });
-        assert!(result.is_err(), "Expected panic for delta +2000");
+        let mut enc = Encoder::new();
+        enc.append(base_ts, 0).unwrap(); // interval 0
+        enc.append(base_ts + 300, 0).unwrap(); // interval 1
+        enc.append(base_ts + 600, 2000).unwrap(); // interval 2: temp=2000
+        // interval 3: triggers finalize(2), delta=2000
+        assert!(matches!(
+            enc.append(base_ts + 900, 0),
+            Err(AppendError::DeltaOverflow {
+                delta: 2000,
+                prev_temp: 0,
+                new_temp: 2000
+            })
+        ));
 
         // Test negative delta overflow: 2000 to 0 = delta of -2000 (out of range)
-        let result = std::panic::catch_unwind(|| {
-            let mut enc = Encoder::new();
-            enc.append(base_ts, 2000);       // interval 0
-            enc.append(base_ts + 300, 2000); // interval 1
-            enc.append(base_ts + 600, 0);    // interval 2: temp=0
-            enc.append(base_ts + 900, 0);    // interval 3: triggers finalize(2), delta=-2000
-        });
-        assert!(result.is_err(), "Expected panic for delta -2000");
-
-        // Test boundary: delta of exactly +1024 should panic
-        let result = std::panic::catch_unwind(|| {
-            let mut enc = Encoder::new();
-            enc.append(base_ts, 0);
-            enc.append(base_ts + 300, 0);
-            enc.append(base_ts + 600, 1024); // delta will be +1024
-            enc.append(base_ts + 900, 0);
-        });
-        assert!(result.is_err(), "Expected panic for delta +1024");
-
-        // Test boundary: delta of exactly -1025 should panic
-        let result = std::panic::catch_unwind(|| {
-            let mut enc = Encoder::new();
-            enc.append(base_ts, 1025);
-            enc.append(base_ts + 300, 1025);
-            enc.append(base_ts + 600, 0); // delta will be -1025
-            enc.append(base_ts + 900, 0);
-        });
-        assert!(result.is_err(), "Expected panic for delta -1025");
-
-        // Test boundary: delta of exactly +1023 should NOT panic
-        let result = std::panic::catch_unwind(|| {
-            let mut enc = Encoder::new();
-            enc.append(base_ts, 0);
-            enc.append(base_ts + 300, 0);
-            enc.append(base_ts + 600, 1023); // delta will be +1023
-            enc.append(base_ts + 900, 0);
-        });
-        assert!(result.is_ok(), "Delta +1023 should not panic");
-
-        // Test boundary: delta of exactly -1024 should NOT panic
-        let result = std::panic::catch_unwind(|| {
-            let mut enc = Encoder::new();
-            enc.append(base_ts, 1024);
-            enc.append(base_ts + 300, 1024);
-            enc.append(base_ts + 600, 0); // delta will be -1024
-            enc.append(base_ts + 900, 0);
-        });
-        assert!(result.is_ok(), "Delta -1024 should not panic");
-    }
-
-    #[test]
-    fn test_sentinel_value_creates_gap() {
-        // SENTINEL_VALUE (-1000) should not be stored, used to represent gaps
-        let base_ts = 1761955455u64;
         let mut enc = Encoder::new();
+        enc.append(base_ts, 2000).unwrap(); // interval 0
+        enc.append(base_ts + 300, 2000).unwrap(); // interval 1
+        enc.append(base_ts + 600, 0).unwrap(); // interval 2: temp=0
+        // interval 3: triggers finalize(2), delta=-2000
+        assert!(matches!(
+            enc.append(base_ts + 900, 0),
+            Err(AppendError::DeltaOverflow {
+                delta: -2000,
+                prev_temp: 2000,
+                new_temp: 0
+            })
+        ));
 
-        enc.append(base_ts, 22);
-        enc.append(base_ts + 300, SENTINEL_VALUE); // Gap
-        enc.append(base_ts + 600, 24);
-
-        let decoded = enc.decode();
-        assert_eq!(decoded.len(), 2, "SENTINEL_VALUE should not create a reading");
-        assert_eq!(decoded[0].temperature, 22);
-        assert_eq!(decoded[1].temperature, 24);
-        // Gap is preserved in timestamps
-        assert_eq!(decoded[1].ts - decoded[0].ts, 600);
-    }
-
-    #[test]
-    fn test_sentinel_value_as_first_reading() {
-        // SENTINEL_VALUE as first reading should be ignored
-        let base_ts = 1761955455u64;
+        // Test boundary: delta of exactly +1024 should return error
         let mut enc = Encoder::new();
+        enc.append(base_ts, 0).unwrap();
+        enc.append(base_ts + 300, 0).unwrap();
+        enc.append(base_ts + 600, 1024).unwrap(); // delta will be +1024
+        assert!(matches!(
+            enc.append(base_ts + 900, 0),
+            Err(AppendError::DeltaOverflow {
+                delta: 1024,
+                prev_temp: 0,
+                new_temp: 1024
+            })
+        ));
 
-        enc.append(base_ts, SENTINEL_VALUE); // Should be ignored
-        enc.append(base_ts + 300, 22);
-        enc.append(base_ts + 600, 24);
+        // Test boundary: delta of exactly -1025 should return error
+        let mut enc = Encoder::new();
+        enc.append(base_ts, 1025).unwrap();
+        enc.append(base_ts + 300, 1025).unwrap();
+        enc.append(base_ts + 600, 0).unwrap(); // delta will be -1025
+        assert!(matches!(
+            enc.append(base_ts + 900, 0),
+            Err(AppendError::DeltaOverflow {
+                delta: -1025,
+                prev_temp: 1025,
+                new_temp: 0
+            })
+        ));
 
-        let decoded = enc.decode();
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0].ts, base_ts + 300); // First actual reading
-        assert_eq!(decoded[0].temperature, 22);
+        // Test boundary: delta of exactly +1023 should NOT return error
+        let mut enc = Encoder::new();
+        enc.append(base_ts, 0).unwrap();
+        enc.append(base_ts + 300, 0).unwrap();
+        enc.append(base_ts + 600, 1023).unwrap(); // delta will be +1023
+        enc.append(base_ts + 900, 0).unwrap(); // Should succeed
+
+        // Test boundary: delta of exactly -1024 should NOT return error
+        let mut enc = Encoder::new();
+        enc.append(base_ts, 1024).unwrap();
+        enc.append(base_ts + 300, 1024).unwrap();
+        enc.append(base_ts + 600, 0).unwrap(); // delta will be -1024
+        enc.append(base_ts + 900, 0).unwrap(); // Should succeed
     }
 
     #[test]
@@ -2465,9 +2648,9 @@ mod tests {
         let base_ts = 1761955455u64;
         let mut enc = Encoder::with_interval(65535);
 
-        enc.append(base_ts, 22);
-        enc.append(base_ts + 65535, 23); // Exactly one interval later
-        enc.append(base_ts + 65535 * 2, 24); // Two intervals later
+        enc.append(base_ts, 22).unwrap();
+        enc.append(base_ts + 65535, 23).unwrap(); // Exactly one interval later
+        enc.append(base_ts + 65535 * 2, 24).unwrap(); // Two intervals later
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 3);
@@ -2479,8 +2662,8 @@ mod tests {
     fn test_timestamp_at_epoch_base() {
         // Timestamp exactly at EPOCH_BASE should work
         let mut enc = Encoder::new();
-        enc.append(1_760_000_000, 22); // Exactly EPOCH_BASE
-        enc.append(1_760_000_300, 23);
+        enc.append(1_760_000_000, 22).unwrap(); // Exactly EPOCH_BASE
+        enc.append(1_760_000_300, 23).unwrap();
 
         let decoded = enc.decode();
         assert_eq!(decoded.len(), 2);
@@ -2495,7 +2678,7 @@ mod tests {
 
         // Add exactly 65535 readings
         for i in 0..65535u64 {
-            enc.append(base_ts + i, 22);
+            enc.append(base_ts + i, 22).unwrap();
         }
 
         assert_eq!(enc.count(), 65535);
@@ -2538,7 +2721,7 @@ mod proptests {
         fn prop_size_accuracy((readings, interval) in arb_readings()) {
             let mut enc = Encoder::with_interval(interval);
             for (ts, temp) in readings {
-                enc.append(ts, temp);
+                enc.append(ts, temp).unwrap();
             }
             prop_assert_eq!(enc.size(), enc.to_bytes().len());
         }
@@ -2548,7 +2731,7 @@ mod proptests {
         fn prop_count_consistency((readings, interval) in arb_readings()) {
             let mut enc = Encoder::with_interval(interval);
             for (ts, temp) in readings {
-                enc.append(ts, temp);
+                enc.append(ts, temp).unwrap();
             }
             let decoded = enc.decode();
             prop_assert_eq!(decoded.len(), enc.count());
@@ -2559,7 +2742,7 @@ mod proptests {
         fn prop_roundtrip_via_bytes((readings, interval) in arb_readings()) {
             let mut enc = Encoder::with_interval(interval);
             for (ts, temp) in readings {
-                enc.append(ts, temp);
+                enc.append(ts, temp).unwrap();
             }
 
             let direct = enc.decode();
@@ -2577,7 +2760,7 @@ mod proptests {
         fn prop_monotonic_timestamps((readings, interval) in arb_readings()) {
             let mut enc = Encoder::with_interval(interval);
             for (ts, temp) in readings {
-                enc.append(ts, temp);
+                enc.append(ts, temp).unwrap();
             }
 
             let decoded = enc.decode();
@@ -2592,7 +2775,7 @@ mod proptests {
         fn prop_idempotent_serialization((readings, interval) in arb_readings()) {
             let mut enc = Encoder::with_interval(interval);
             for (ts, temp) in readings {
-                enc.append(ts, temp);
+                enc.append(ts, temp).unwrap();
             }
 
             let bytes1 = enc.to_bytes();
@@ -2605,7 +2788,7 @@ mod proptests {
         fn prop_timestamp_alignment((readings, interval) in arb_readings()) {
             let mut enc = Encoder::with_interval(interval);
             for (ts, temp) in readings {
-                enc.append(ts, temp);
+                enc.append(ts, temp).unwrap();
             }
 
             let decoded = enc.decode();
@@ -2632,7 +2815,7 @@ mod proptests {
 
             let mut enc = Encoder::with_interval(interval);
             for &(ts, temp) in &readings {
-                enc.append(ts, temp);
+                enc.append(ts, temp).unwrap();
             }
 
             let decoded = enc.decode();
@@ -2688,7 +2871,7 @@ mod proptests {
             // One reading per interval, no jitter
             for (i, &temp) in temps.iter().enumerate() {
                 let ts = BASE_TS + (i as u64) * (interval as u64);
-                enc.append(ts, temp);
+                enc.append(ts, temp).unwrap();
             }
 
             let decoded = enc.decode();
@@ -2721,7 +2904,7 @@ mod proptests {
                 for (j, &temp) in temps.iter().enumerate() {
                     // Spread readings within the interval
                     let offset = (j as u64) % (interval as u64);
-                    enc.append(interval_start + offset, temp);
+                    enc.append(interval_start + offset, temp).unwrap();
                 }
             }
 
@@ -2764,7 +2947,7 @@ mod proptests {
                 for j in 0..count {
                     // Add jitter within interval bounds
                     let jitter = (j as u64 * 17) % (interval as u64);
-                    enc.append(interval_start + jitter, 22);
+                    enc.append(interval_start + jitter, 22).unwrap();
                 }
             }
 
@@ -2792,7 +2975,7 @@ mod proptests {
             // Add one reading per selected interval
             for &idx in &indices {
                 let ts = BASE_TS + idx * (interval as u64);
-                enc.append(ts, 22);
+                enc.append(ts, 22).unwrap();
             }
 
             let decoded = enc.decode();
@@ -2833,41 +3016,37 @@ mod proptests {
                 return Ok(());
             }
 
+            // Sort timestamps to ensure monotonic order (encoder rejects out-of-order)
+            let mut sorted_timestamps = timestamps.clone();
+            sorted_timestamps.sort();
+
             let mut enc = Encoder::with_interval(interval);
 
             // Add readings at each timestamp
-            for &ts_offset in &timestamps {
-                enc.append(BASE_TS + ts_offset, 22);
+            for &ts_offset in &sorted_timestamps {
+                enc.append(BASE_TS + ts_offset, 22).unwrap();
             }
 
             let decoded = enc.decode();
 
             // Calculate expected unique intervals relative to the FIRST timestamp (base_ts)
             // The encoder uses the first reading's timestamp as base_ts
-            let base_offset = timestamps[0];
+            let base_offset = sorted_timestamps[0];
             let mut unique_intervals = std::collections::BTreeSet::new();
             let mut prev_idx: Option<u64> = None;
 
-            for &ts_offset in &timestamps {
-                // Skip timestamps before base (would be rejected by encoder)
-                if ts_offset < base_offset {
-                    continue;
-                }
+            for &ts_offset in &sorted_timestamps {
                 let idx = (ts_offset - base_offset) / (interval as u64);
-                // Only count if it's the first or advances the index (encoder skips backwards)
+                // Only count if it's the first or advances the index (encoder skips same/backwards)
                 if prev_idx.is_none() || idx > prev_idx.unwrap() {
                     unique_intervals.insert(idx);
-                    prev_idx = Some(idx);
-                }
-                // Same interval: still update prev_idx for tracking
-                if prev_idx == Some(idx) {
                     prev_idx = Some(idx);
                 }
             }
 
             prop_assert_eq!(decoded.len(), unique_intervals.len(),
                 "Expected {} unique intervals, got {} decoded readings. timestamps={:?}, base_offset={}, interval={}",
-                unique_intervals.len(), decoded.len(), timestamps, base_offset, interval);
+                unique_intervals.len(), decoded.len(), sorted_timestamps, base_offset, interval);
         }
     }
 }

@@ -1,0 +1,81 @@
+#![no_main]
+
+use libfuzzer_sys::fuzz_target;
+use nibblerun::Encoder;
+
+fuzz_target!(|data: &[u8]| {
+    // Need at least 2 bytes for interval + some data
+    if data.len() < 5 {
+        return;
+    }
+
+    // First 2 bytes determine interval (1-65535)
+    let interval = u16::from_le_bytes([data[0], data[1]]).max(1) as u64;
+    let mut enc = Encoder::with_interval(interval as u16);
+    let base_ts = 1_760_000_000u64;
+
+    // Track which intervals have readings
+    let mut intervals_with_data: Vec<u64> = Vec::new();
+    let mut prev_temp: Option<i32> = None;
+
+    // Generate readings with gaps
+    // Format: each 3 bytes = (interval_idx high, interval_idx low, temp)
+    for chunk in data[2..].chunks(3) {
+        if chunk.len() < 3 {
+            break;
+        }
+
+        // Use 2 bytes for interval index to allow gaps
+        let interval_idx = u16::from_le_bytes([chunk[0], chunk[1]]) as u64;
+        let temp = chunk[2] as i8 as i32;
+        let ts = base_ts + interval_idx * interval;
+
+        // Check delta constraint
+        if let Some(prev) = prev_temp {
+            let delta = temp - prev;
+            if delta < -1024 || delta > 1023 {
+                continue;
+            }
+        }
+
+        if enc.append(ts, temp).is_ok() {
+            // Only track if this is a new interval (encoder deduplicates)
+            if intervals_with_data.is_empty() || *intervals_with_data.last().unwrap() < interval_idx
+            {
+                intervals_with_data.push(interval_idx);
+                prev_temp = Some(temp);
+            }
+        }
+    }
+
+    let decoded = enc.decode();
+
+    // Property: Gaps between readings are preserved correctly
+    // The timestamp difference should equal (index_diff * interval)
+    if decoded.len() >= 2 && intervals_with_data.len() >= 2 {
+        for i in 0..decoded.len() - 1 {
+            let ts_diff = decoded[i + 1].ts - decoded[i].ts;
+            let expected_idx_diff = intervals_with_data[i + 1] - intervals_with_data[i];
+            let expected_ts_diff = expected_idx_diff * interval;
+
+            assert_eq!(
+                ts_diff, expected_ts_diff,
+                "Gap mismatch between readings {} and {}: expected {} ({} intervals), got {}",
+                i,
+                i + 1,
+                expected_ts_diff,
+                expected_idx_diff,
+                ts_diff
+            );
+        }
+    }
+
+    // Also verify count matches
+    assert_eq!(
+        decoded.len(),
+        intervals_with_data.len(),
+        "Reading count mismatch: expected {}, got {}",
+        intervals_with_data.len(),
+        decoded.len()
+    );
+});
