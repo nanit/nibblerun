@@ -40,17 +40,18 @@
 //! - 10% have delta=±1 → 3 bits
 //! - Remaining deltas use 7-19 bits
 //!
-//! ## Header (10 bytes)
+//! ## Header (12 bytes)
 //! - `base_ts_offset`: 4 bytes (timestamp - epoch base)
 //! - `duration`: 2 bytes (number of intervals)
 //! - `count`: 2 bytes (number of readings)
 //! - `first_temp`: 1 byte (first temperature - temp base)
 //! - `reserved`: 1 byte
+//! - `interval`: 2 bytes (seconds between readings)
 //!
 //! ## Supported Ranges
 //! - Temperature: -108 to 147 (i8 offset from base of 20)
 //! - Readings per encoder: up to 65535
-//! - Timestamp intervals: 300 seconds (5 minutes)
+//! - Timestamp intervals: 1-65535 seconds (configurable)
 
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -80,12 +81,12 @@ const TEMP_BASE: i32 = 20;
 pub const DEFAULT_INTERVAL: u64 = 300;
 
 /// Header size in bytes
-const HEADER_SIZE: usize = 10;
+const HEADER_SIZE: usize = 12;
 
-/// Division by interval (300 seconds)
+/// Division by interval
 #[inline]
-fn fast_div_300(x: u64) -> u64 {
-    x / 300
+fn div_by_interval(x: u64, interval: u16) -> u64 {
+    x / interval as u64
 }
 
 /// Offset for storing signed sum in unsigned bits (±1M range)
@@ -153,13 +154,24 @@ pub struct Encoder {
     bits_in_accum: u32,
     prev_logical_idx: u32,
     count: u16,
+    interval: u16,
 }
 
 impl Encoder {
-    /// Create a new encoder
+    /// Create a new encoder with default 300-second (5-minute) interval
     #[inline]
     #[must_use]
     pub fn new() -> Self {
+        Self::with_interval(DEFAULT_INTERVAL as u16)
+    }
+
+    /// Create a new encoder with a custom interval
+    ///
+    /// # Arguments
+    /// * `interval` - Interval between readings in seconds (e.g., 300 for 5 minutes)
+    #[inline]
+    #[must_use]
+    pub fn with_interval(interval: u16) -> Self {
         Encoder {
             base_ts: 0,
             last_ts: 0,
@@ -171,7 +183,15 @@ impl Encoder {
             bits_in_accum: 0,
             prev_logical_idx: 0,
             count: 0,
+            interval,
         }
+    }
+
+    /// Get the interval in seconds
+    #[inline]
+    #[must_use]
+    pub fn interval(&self) -> u16 {
+        self.interval
     }
 
     /// Append a temperature reading
@@ -207,8 +227,8 @@ impl Encoder {
             return;
         }
 
-        // Calculate logical index using fast division
-        let logical_idx = fast_div_300(ts - self.base_ts) as u32;
+        // Calculate logical index
+        let logical_idx = div_by_interval(ts - self.base_ts, self.interval) as u32;
 
         // Skip readings that go backwards in time
         if logical_idx < self.prev_logical_idx {
@@ -474,10 +494,11 @@ impl Encoder {
         let mut idx = 1u64;
         let count = self.count as usize;
 
+        let interval = self.interval as u64;
         while decoded.len() < count && reader.has_more() {
             if reader.read_bits(1) == 0 {
                 decoded.push(Reading {
-                    ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                    ts: self.base_ts + idx * interval,
                     temperature: prev_temp,
                 });
                 idx += 1;
@@ -486,7 +507,7 @@ impl Encoder {
             if reader.read_bits(1) == 0 {
                 prev_temp += if reader.read_bits(1) == 0 { 1 } else { -1 };
                 decoded.push(Reading {
-                    ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                    ts: self.base_ts + idx * interval,
                     temperature: prev_temp,
                 });
                 idx += 1;
@@ -498,7 +519,7 @@ impl Encoder {
                         break;
                     }
                     decoded.push(Reading {
-                        ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                        ts: self.base_ts + idx * interval,
                         temperature: prev_temp,
                     });
                     idx += 1;
@@ -511,7 +532,7 @@ impl Encoder {
                         break;
                     }
                     decoded.push(Reading {
-                        ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                        ts: self.base_ts + idx * interval,
                         temperature: prev_temp,
                     });
                     idx += 1;
@@ -524,7 +545,7 @@ impl Encoder {
                         break;
                     }
                     decoded.push(Reading {
-                        ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                        ts: self.base_ts + idx * interval,
                         temperature: prev_temp,
                     });
                     idx += 1;
@@ -534,7 +555,7 @@ impl Encoder {
             if reader.read_bits(1) == 0 {
                 prev_temp += if reader.read_bits(1) == 0 { 2 } else { -2 };
                 decoded.push(Reading {
-                    ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                    ts: self.base_ts + idx * interval,
                     temperature: prev_temp,
                 });
                 idx += 1;
@@ -544,7 +565,7 @@ impl Encoder {
                 let e = reader.read_bits(4) as i32;
                 prev_temp += if e < 8 { e - 10 } else { e - 5 };
                 decoded.push(Reading {
-                    ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                    ts: self.base_ts + idx * interval,
                     temperature: prev_temp,
                 });
                 idx += 1;
@@ -558,7 +579,7 @@ impl Encoder {
                     raw as i32
                 };
                 decoded.push(Reading {
-                    ts: self.base_ts + idx * DEFAULT_INTERVAL,
+                    ts: self.base_ts + idx * interval,
                     temperature: prev_temp,
                 });
                 idx += 1;
@@ -601,11 +622,12 @@ impl Encoder {
         // Header
         let base_ts_offset = (self.base_ts - EPOCH_BASE) as u32;
         result.extend_from_slice(&base_ts_offset.to_le_bytes());
-        let duration = fast_div_300(self.last_ts - self.base_ts) as u16;
+        let duration = div_by_interval(self.last_ts - self.base_ts, self.interval) as u16;
         result.extend_from_slice(&duration.to_le_bytes());
         result.extend_from_slice(&self.count.to_le_bytes());
         result.push((first_temp - TEMP_BASE) as i8 as u8);
         result.push(0u8);
+        result.extend_from_slice(&self.interval.to_le_bytes());
 
         // Data
         result.extend_from_slice(&self.data);
@@ -761,6 +783,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
     let start_ts = EPOCH_BASE + u64::from(base_ts_offset);
     let count = u16::from_le_bytes(bytes[6..8].try_into().unwrap()) as usize;
     let first_temp = TEMP_BASE + i32::from(bytes[8] as i8);
+    let interval = u16::from_le_bytes(bytes[10..12].try_into().unwrap()) as u64;
 
     let mut decoded = Vec::with_capacity(count);
     if count == 0 {
@@ -783,7 +806,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
         if reader.read_bits(1) == 0 {
             // Single zero: 0
             decoded.push(Reading {
-                ts: start_ts + idx * DEFAULT_INTERVAL,
+                ts: start_ts + idx * interval,
                 temperature: prev_temp,
             });
             idx += 1;
@@ -793,7 +816,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             // ±1: 10 + sign
             prev_temp += if reader.read_bits(1) == 0 { 1 } else { -1 };
             decoded.push(Reading {
-                ts: start_ts + idx * DEFAULT_INTERVAL,
+                ts: start_ts + idx * interval,
                 temperature: prev_temp,
             });
             idx += 1;
@@ -806,7 +829,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
                     break;
                 }
                 decoded.push(Reading {
-                    ts: start_ts + idx * DEFAULT_INTERVAL,
+                    ts: start_ts + idx * interval,
                     temperature: prev_temp,
                 });
                 idx += 1;
@@ -820,7 +843,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
                     break;
                 }
                 decoded.push(Reading {
-                    ts: start_ts + idx * DEFAULT_INTERVAL,
+                    ts: start_ts + idx * interval,
                     temperature: prev_temp,
                 });
                 idx += 1;
@@ -834,7 +857,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
                     break;
                 }
                 decoded.push(Reading {
-                    ts: start_ts + idx * DEFAULT_INTERVAL,
+                    ts: start_ts + idx * interval,
                     temperature: prev_temp,
                 });
                 idx += 1;
@@ -845,7 +868,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             // ±2: 111110 + sign
             prev_temp += if reader.read_bits(1) == 0 { 2 } else { -2 };
             decoded.push(Reading {
-                ts: start_ts + idx * DEFAULT_INTERVAL,
+                ts: start_ts + idx * interval,
                 temperature: prev_temp,
             });
             idx += 1;
@@ -856,7 +879,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             let e = reader.read_bits(4) as i32;
             prev_temp += if e < 8 { e - 10 } else { e - 5 };
             decoded.push(Reading {
-                ts: start_ts + idx * DEFAULT_INTERVAL,
+                ts: start_ts + idx * interval,
                 temperature: prev_temp,
             });
             idx += 1;
@@ -871,7 +894,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
                 raw as i32
             };
             decoded.push(Reading {
-                ts: start_ts + idx * DEFAULT_INTERVAL,
+                ts: start_ts + idx * interval,
                 temperature: prev_temp,
             });
             idx += 1;
@@ -935,9 +958,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_fast_div_300() {
+    fn test_div_by_interval() {
         for x in [0, 1, 299, 300, 301, 599, 600, 1000, 10000, 100000, 200000] {
-            assert_eq!(fast_div_300(x), x / 300, "failed for x={}", x);
+            assert_eq!(div_by_interval(x, 300), x / 300, "failed for x={}", x);
         }
     }
 
@@ -1627,10 +1650,54 @@ mod tests {
             assert_eq!(reading.ts, base_ts + (i as u64) * 300, "wrong timestamp at index {}", i);
         }
 
-        // Size should be minimal: header (10 bytes) + zero-run encoding for 4 repeated values
+        // Size should be minimal: header (12 bytes) + zero-run encoding for 4 repeated values
         // First temp (23) is in header, then 4 zeros encoded as single zero-run
         // Zero run of 4 uses 5-bit encoding: 110xx (5 bits) = 1 byte when padded
         let size = encoder.size();
-        assert_eq!(size, 11, "expected size of 11 bytes (header + 1 byte zero-run), got {}", size);
+        assert_eq!(size, 13, "expected size of 13 bytes (header + 1 byte zero-run), got {}", size);
+    }
+
+    #[test]
+    fn test_custom_interval() {
+        let base_ts = 1761955455u64;
+
+        // Test with 60-second interval
+        let mut enc = Encoder::with_interval(60);
+        assert_eq!(enc.interval(), 60);
+
+        enc.append(base_ts, 22);
+        enc.append(base_ts + 60, 23);
+        enc.append(base_ts + 120, 24);
+
+        let decoded = enc.decode();
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0].ts, base_ts);
+        assert_eq!(decoded[1].ts, base_ts + 60);
+        assert_eq!(decoded[2].ts, base_ts + 120);
+        assert_eq!(decoded[0].temperature, 22);
+        assert_eq!(decoded[1].temperature, 23);
+        assert_eq!(decoded[2].temperature, 24);
+
+        // Test roundtrip via bytes
+        let bytes = enc.to_bytes();
+        let decoded_bytes = decode(&bytes);
+        assert_eq!(decoded_bytes.len(), 3);
+        assert_eq!(decoded_bytes[1].ts, base_ts + 60);
+    }
+
+    #[test]
+    fn test_custom_interval_averaging() {
+        let base_ts = 1761955455u64;
+
+        // Test averaging with 60-second interval
+        let mut enc = Encoder::with_interval(60);
+
+        // Two readings in same 60-second interval
+        enc.append(base_ts, 20);
+        enc.append(base_ts + 30, 24);  // Same interval, should average to 22
+
+        let decoded = enc.decode();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].temperature, 22);  // (20 + 24) / 2 = 22
     }
 }
