@@ -12,7 +12,7 @@ use crate::DEFAULT_INTERVAL;
 
 /// Encoder for `NibbleRun` format
 ///
-/// Accumulates temperature readings and produces compressed output.
+/// Accumulates sensor readings and produces compressed output.
 /// Optimized for cache efficiency with compact struct layout.
 #[repr(C)]
 #[derive(Clone, Serialize, Deserialize)]
@@ -68,13 +68,13 @@ impl Encoder {
         self.interval
     }
 
-    /// Append a temperature reading
+    /// Append a sensor reading
     ///
     /// Multiple readings in the same interval are averaged.
     ///
     /// # Arguments
     /// * `ts` - Unix timestamp in seconds
-    /// * `temperature` - Temperature value
+    /// * `value` - Sensor value
     ///
     /// # Errors
     /// Returns an error if:
@@ -82,19 +82,19 @@ impl Encoder {
     /// - Timestamp is out of order (earlier interval than previous)
     /// - Too many readings in the same interval (max 1023)
     /// - Too many total readings (max 65535)
-    /// - Temperature delta exceeds encodable range [-1024, 1023]
+    /// - Value delta exceeds encodable range [-1024, 1023]
     #[inline]
-    pub fn append(&mut self, ts: u64, temperature: i32) -> Result<(), AppendError> {
+    pub fn append(&mut self, ts: u64, value: i32) -> Result<(), AppendError> {
         // First reading - initialize pending state
         if self.count == 0 {
             self.base_ts = ts;
             self.last_ts = ts;
-            self.first_temp = temperature;
-            self.prev_temp = temperature;
+            self.first_temp = value;
+            self.prev_temp = value;
             self.prev_logical_idx = 0;
             self.count = 1;
-            // Initialize pending: count=1, sum=temperature
-            self.pending_state = pack_pending(0, 1, temperature);
+            // Initialize pending: count=1, sum=value
+            self.pending_state = pack_pending(0, 1, value);
             return Ok(());
         }
 
@@ -124,7 +124,7 @@ impl Encoder {
             if count >= 1023 {
                 return Err(AppendError::IntervalOverflow { count });
             }
-            self.pending_state = pack_pending(bits, count + 1, sum.saturating_add(temperature));
+            self.pending_state = pack_pending(bits, count + 1, sum.saturating_add(value));
             self.last_ts = ts;
             return Ok(());
         }
@@ -144,8 +144,8 @@ impl Encoder {
             if !(-1024..=1023).contains(&delta) {
                 return Err(AppendError::DeltaOverflow {
                     delta,
-                    prev_temp: self.prev_temp,
-                    new_temp: avg,
+                    prev_value: self.prev_temp,
+                    new_value: avg,
                 });
             }
         }
@@ -166,9 +166,9 @@ impl Encoder {
         self.prev_logical_idx = logical_idx;
         self.last_ts = ts;
         self.count += 1;
-        // Initialize pending for new interval: count=1, sum=temperature
+        // Initialize pending for new interval: count=1, sum=value
         let (bits, _, _) = unpack_pending(self.pending_state);
-        self.pending_state = pack_pending(bits, 1, temperature);
+        self.pending_state = pack_pending(bits, 1, value);
 
         Ok(())
     }
@@ -339,7 +339,7 @@ impl Encoder {
         let mut decoded = Vec::with_capacity(self.count as usize);
         decoded.push(Reading {
             ts: self.base_ts,
-            temperature: first_temp,
+            value: first_temp,
         });
 
         if self.count == 1 {
@@ -408,7 +408,7 @@ impl Encoder {
             if reader.read_bits(1) == 0 {
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
-                    temperature: prev_temp,
+                    value: prev_temp,
                 });
                 idx += 1;
                 continue;
@@ -417,7 +417,7 @@ impl Encoder {
                 prev_temp += if reader.read_bits(1) == 0 { 1 } else { -1 };
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
-                    temperature: prev_temp,
+                    value: prev_temp,
                 });
                 idx += 1;
                 continue;
@@ -429,7 +429,7 @@ impl Encoder {
                     }
                     decoded.push(Reading {
                         ts: self.base_ts + idx * interval,
-                        temperature: prev_temp,
+                        value: prev_temp,
                     });
                     idx += 1;
                 }
@@ -442,7 +442,7 @@ impl Encoder {
                     }
                     decoded.push(Reading {
                         ts: self.base_ts + idx * interval,
-                        temperature: prev_temp,
+                        value: prev_temp,
                     });
                     idx += 1;
                 }
@@ -455,7 +455,7 @@ impl Encoder {
                     }
                     decoded.push(Reading {
                         ts: self.base_ts + idx * interval,
-                        temperature: prev_temp,
+                        value: prev_temp,
                     });
                     idx += 1;
                 }
@@ -465,7 +465,7 @@ impl Encoder {
                 prev_temp += if reader.read_bits(1) == 0 { 2 } else { -2 };
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
-                    temperature: prev_temp,
+                    value: prev_temp,
                 });
                 idx += 1;
                 continue;
@@ -475,7 +475,7 @@ impl Encoder {
                 prev_temp += if e < 8 { e - 10 } else { e - 5 };
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
-                    temperature: prev_temp,
+                    value: prev_temp,
                 });
                 idx += 1;
                 continue;
@@ -489,7 +489,7 @@ impl Encoder {
                 };
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
-                    temperature: prev_temp,
+                    value: prev_temp,
                 });
                 idx += 1;
             } else {
@@ -652,7 +652,7 @@ impl Default for Encoder {
     }
 }
 
-/// Bit reader for decoding variable-length bit sequences (internal to Encoder::decode)
+/// Bit reader for decoding variable-length bit sequences (internal to `Encoder::decode`)
 struct BitReader<'a> {
     buf: &'a [u8],
     pos: usize,

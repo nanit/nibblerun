@@ -77,7 +77,7 @@ pub(crate) fn unpack_pending(packed: u64) -> (u32, u16, i32) {
     (bits, count, sum)
 }
 
-/// Encode a zero run, returning (bits, num_bits, consumed)
+/// Encode a zero run, returning (bits, `num_bits`, consumed)
 #[inline]
 pub(crate) fn encode_zero_run(n: u32) -> (u32, u32, u32) {
     if n == 1 {

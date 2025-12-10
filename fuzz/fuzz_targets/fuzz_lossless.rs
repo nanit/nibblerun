@@ -64,9 +64,9 @@ fuzz_target!(|data: &[u8]| {
 
     for (reading, &(expected_interval, expected_temp)) in decoded.iter().zip(inputs.iter()) {
         assert_eq!(
-            reading.temperature, expected_temp,
-            "Temperature mismatch: expected {}, got {}",
-            expected_temp, reading.temperature
+            reading.value, expected_temp,
+            "Value mismatch: expected {}, got {}",
+            expected_temp, reading.value
         );
 
         // Verify timestamp is exactly at the expected interval boundary

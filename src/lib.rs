@@ -37,7 +37,7 @@
 //! // Decode back
 //! let readings = decode(&bytes);
 //! for r in &readings {
-//!     println!("ts={}, temp={}", r.ts, r.temperature);
+//!     println!("ts={}, value={}", r.ts, r.value);
 //! }
 //! ```
 //!
@@ -50,7 +50,7 @@
 //! | 0 | 4 | `base_ts_offset` | First timestamp minus epoch base (1,760,000,000). Reconstructed as `epoch_base + offset`. |
 //! | 4 | 2 | `duration` | Number of intervals from first to last reading. Metadata for quick time-span queries without decoding. |
 //! | 6 | 2 | `count` | Total number of readings stored. Used by decoder to know when to stop. |
-//! | 8 | 4 | `first_temp` | First value as i32, stored directly (not delta-encoded). |
+//! | 8 | 4 | `first_value` | First value as i32, stored directly (not delta-encoded). |
 //! | 12 | 2 | `interval` | Interval between readings in seconds (1-65535). |
 //!
 //! ## Bit-Packed Data

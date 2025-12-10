@@ -7,7 +7,8 @@
       "Bash(cargo fuzz run:*)",
       "Bash(cargo +nightly fuzz run:*)",
       "Bash(rustup run nightly cargo fuzz run:*)",
-      "Bash(cargo doc:*)"
+      "Bash(cargo doc:*)",
+      "Bash(cargo clippy:*)"
     ],
     "deny": [],
     "ask": []

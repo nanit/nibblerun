@@ -58,9 +58,9 @@ fuzz_target!(|data: &[u8]| {
             let interval_idx = (reading.ts - base) / (interval as u64);
             if let Some(&(min, max)) = interval_bounds.get(&interval_idx) {
                 assert!(
-                    reading.temperature >= min && reading.temperature <= max,
-                    "Decoded temp {} outside bounds [{}, {}] for interval {}",
-                    reading.temperature, min, max, interval_idx
+                    reading.value >= min && reading.value <= max,
+                    "Decoded value {} outside bounds [{}, {}] for interval {}",
+                    reading.value, min, max, interval_idx
                 );
             }
         }

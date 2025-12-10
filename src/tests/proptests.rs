@@ -62,7 +62,7 @@ proptest! {
         prop_assert_eq!(direct.len(), via_bytes.len());
         for (d, b) in direct.iter().zip(via_bytes.iter()) {
             prop_assert_eq!(d.ts, b.ts);
-            prop_assert_eq!(d.temperature, b.temperature);
+            prop_assert_eq!(d.value, b.value);
         }
     }
 
@@ -163,9 +163,9 @@ proptest! {
                 let max_temp = *temps.iter().max().unwrap();
 
                 prop_assert!(
-                    reading.temperature >= min_temp && reading.temperature <= max_temp,
+                    reading.value >= min_temp && reading.value <= max_temp,
                     "Decoded temp {} not in range [{}, {}] for interval {}",
-                    reading.temperature, min_temp, max_temp, idx
+                    reading.value, min_temp, max_temp, idx
                 );
             }
         }
@@ -190,9 +190,9 @@ proptest! {
             "Decoded count {} doesn't match input count {}", decoded.len(), temps.len());
 
         for (i, reading) in decoded.iter().enumerate() {
-            prop_assert_eq!(reading.temperature, temps[i],
+            prop_assert_eq!(reading.value, temps[i],
                 "Single reading at interval {} should be exact: expected {}, got {}",
-                i, temps[i], reading.temperature);
+                i, temps[i], reading.value);
         }
     }
 
@@ -234,9 +234,9 @@ proptest! {
                 (sum - count / 2) / count
             };
 
-            prop_assert_eq!(reading.temperature, expected_avg,
+            prop_assert_eq!(reading.value, expected_avg,
                 "Interval {}: expected avg {} (sum={}, count={}), got {}",
-                i, expected_avg, sum, count, reading.temperature);
+                i, expected_avg, sum, count, reading.value);
         }
     }
 

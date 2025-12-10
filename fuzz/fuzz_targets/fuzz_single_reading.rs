@@ -50,9 +50,9 @@ fuzz_target!(|data: &[u8]| {
 
     for (i, (reading, &expected)) in decoded.iter().zip(expected_temps.iter()).enumerate() {
         assert_eq!(
-            reading.temperature, expected,
+            reading.value, expected,
             "Single reading at interval {} should be exact: expected {}, got {}",
-            i, expected, reading.temperature
+            i, expected, reading.value
         );
     }
 });

@@ -39,7 +39,7 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(direct.len(), decoded.len(), "decode length mismatch");
     for (d, b) in direct.iter().zip(decoded.iter()) {
         assert_eq!(d.ts, b.ts, "timestamp mismatch");
-        assert_eq!(d.temperature, b.temperature, "temperature mismatch");
+        assert_eq!(d.value, b.value, "value mismatch");
     }
 
     // Property 4: timestamps are monotonic

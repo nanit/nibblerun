@@ -3,6 +3,29 @@
 use crate::constants::{EPOCH_BASE, HEADER_SIZE};
 use crate::reading::Reading;
 
+/// Push multiple readings with the same value (zero-run decoding)
+#[inline]
+fn push_zero_run(
+    decoded: &mut Vec<Reading>,
+    count: usize,
+    start_ts: u64,
+    interval: u64,
+    temp: i32,
+    idx: &mut u64,
+    run_len: u32,
+) {
+    for _ in 0..run_len {
+        if decoded.len() >= count {
+            break;
+        }
+        decoded.push(Reading {
+            ts: start_ts + *idx * interval,
+            value: temp,
+        });
+        *idx += 1;
+    }
+}
+
 /// Decode `NibbleRun` bytes back to readings
 ///
 /// # Arguments
@@ -17,11 +40,11 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
         return Vec::new();
     }
 
-    let base_ts_offset = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+    let base_ts_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let start_ts = EPOCH_BASE + u64::from(base_ts_offset);
-    let count = u16::from_le_bytes(bytes[6..8].try_into().unwrap()) as usize;
-    let first_temp = i32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    let interval = u64::from(u16::from_le_bytes(bytes[12..14].try_into().unwrap()));
+    let count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
+    let first_temp = i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    let interval = u64::from(u16::from_le_bytes([bytes[12], bytes[13]]));
 
     let mut decoded = Vec::with_capacity(count);
     if count == 0 {
@@ -30,7 +53,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
 
     decoded.push(Reading {
         ts: start_ts,
-        temperature: first_temp,
+        value: first_temp,
     });
     if count == 1 || bytes.len() <= HEADER_SIZE {
         return decoded;
@@ -45,7 +68,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             // Single zero: 0
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
-                temperature: prev_temp,
+                value: prev_temp,
             });
             idx += 1;
             continue;
@@ -55,51 +78,24 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             prev_temp = prev_temp.wrapping_add(if reader.read_bits(1) == 0 { 1 } else { -1 });
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
-                temperature: prev_temp,
+                value: prev_temp,
             });
             idx += 1;
             continue;
         }
         if reader.read_bits(1) == 0 {
             // Zero run 2-5: 110 + 2 bits
-            for _ in 0..reader.read_bits(2) + 2 {
-                if decoded.len() >= count {
-                    break;
-                }
-                decoded.push(Reading {
-                    ts: start_ts + idx * interval,
-                    temperature: prev_temp,
-                });
-                idx += 1;
-            }
+            push_zero_run(&mut decoded, count, start_ts, interval, prev_temp, &mut idx, reader.read_bits(2) + 2);
             continue;
         }
         if reader.read_bits(1) == 0 {
             // Zero run 6-21: 1110 + 4 bits
-            for _ in 0..reader.read_bits(4) + 6 {
-                if decoded.len() >= count {
-                    break;
-                }
-                decoded.push(Reading {
-                    ts: start_ts + idx * interval,
-                    temperature: prev_temp,
-                });
-                idx += 1;
-            }
+            push_zero_run(&mut decoded, count, start_ts, interval, prev_temp, &mut idx, reader.read_bits(4) + 6);
             continue;
         }
         if reader.read_bits(1) == 0 {
             // Zero run 22-149: 11110 + 7 bits
-            for _ in 0..reader.read_bits(7) + 22 {
-                if decoded.len() >= count {
-                    break;
-                }
-                decoded.push(Reading {
-                    ts: start_ts + idx * interval,
-                    temperature: prev_temp,
-                });
-                idx += 1;
-            }
+            push_zero_run(&mut decoded, count, start_ts, interval, prev_temp, &mut idx, reader.read_bits(7) + 22);
             continue;
         }
         if reader.read_bits(1) == 0 {
@@ -107,7 +103,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             prev_temp = prev_temp.wrapping_add(if reader.read_bits(1) == 0 { 2 } else { -2 });
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
-                temperature: prev_temp,
+                value: prev_temp,
             });
             idx += 1;
             continue;
@@ -118,7 +114,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             prev_temp = prev_temp.wrapping_add(if e < 8 { e - 10 } else { e - 5 });
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
-                temperature: prev_temp,
+                value: prev_temp,
             });
             idx += 1;
             continue;
@@ -134,7 +130,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             prev_temp = prev_temp.wrapping_add(delta);
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
-                temperature: prev_temp,
+                value: prev_temp,
             });
             idx += 1;
         } else {

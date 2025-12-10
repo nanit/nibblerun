@@ -17,11 +17,11 @@ pub enum AppendError {
     IntervalOverflow { count: u16 },
     /// Too many total readings (max 65535)
     CountOverflow,
-    /// Temperature delta exceeds encodable range (must be in [-1024, 1023])
+    /// Value delta exceeds encodable range (must be in [-1024, 1023])
     DeltaOverflow {
         delta: i32,
-        prev_temp: i32,
-        new_temp: i32,
+        prev_value: i32,
+        new_value: i32,
     },
 }
 
@@ -47,12 +47,12 @@ impl fmt::Display for AppendError {
             Self::CountOverflow => write!(f, "too many total readings, max is 65535"),
             Self::DeltaOverflow {
                 delta,
-                prev_temp,
-                new_temp,
+                prev_value,
+                new_value,
             } => {
                 write!(
                     f,
-                    "temperature delta {delta} ({prev_temp} -> {new_temp}) exceeds range [-1024, 1023]"
+                    "value delta {delta} ({prev_value} -> {new_value}) exceeds range [-1024, 1023]"
                 )
             }
         }

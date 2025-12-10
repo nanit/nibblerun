@@ -89,9 +89,9 @@ fuzz_target!(|data: &[u8]| {
                     };
 
                     assert_eq!(
-                        reading.temperature, expected_avg,
+                        reading.value, expected_avg,
                         "Average mismatch for interval {}: expected {}, got {} (inputs: {:?})",
-                        interval_idx, expected_avg, reading.temperature, readings
+                        interval_idx, expected_avg, reading.value, readings
                     );
                 }
             }

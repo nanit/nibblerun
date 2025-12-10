@@ -19,7 +19,7 @@ fn test_roundtrip() {
     let dec = enc.decode();
     assert_eq!(dec.len(), temps.len());
     for (i, r) in dec.iter().enumerate() {
-        assert_eq!(r.temperature, temps[i]);
+        assert_eq!(r.value, temps[i]);
     }
 }
 
@@ -36,7 +36,7 @@ fn test_single_reading() {
     enc.append(1761955455, 22).unwrap();
     let dec = enc.decode();
     assert_eq!(dec.len(), 1);
-    assert_eq!(dec[0].temperature, 22);
+    assert_eq!(dec[0].value, 22);
 }
 
 #[test]
@@ -49,8 +49,8 @@ fn test_gaps() {
     enc.append(base + 900, 23).unwrap();
     let dec = enc.decode();
     assert_eq!(dec.len(), 2);
-    assert_eq!(dec[0].temperature, 22);
-    assert_eq!(dec[1].temperature, 23);
+    assert_eq!(dec[0].value, 22);
+    assert_eq!(dec[1].value, 23);
     // Gap is preserved in timestamps
     assert_eq!(dec[1].ts - dec[0].ts, 900);
 }
@@ -65,7 +65,7 @@ fn test_long_run() {
     let dec = enc.decode();
     assert_eq!(dec.len(), 200);
     for r in &dec {
-        assert_eq!(r.temperature, 22);
+        assert_eq!(r.value, 22);
     }
 }
 
@@ -91,7 +91,7 @@ fn test_all_deltas() {
     let dec = enc.decode();
     assert_eq!(dec.len(), temps.len());
     for (i, r) in dec.iter().enumerate() {
-        assert_eq!(r.temperature, temps[i], "mismatch at {}", i);
+        assert_eq!(r.value, temps[i], "mismatch at {}", i);
     }
 }
 
@@ -110,7 +110,7 @@ fn test_temp_range_25_to_39() {
 
     assert_eq!(dec.len(), temps.len(), "count mismatch");
     for (i, r) in dec.iter().enumerate() {
-        assert_eq!(r.temperature, temps[i], "mismatch at {}", i);
+        assert_eq!(r.value, temps[i], "mismatch at {}", i);
     }
 }
 
@@ -128,7 +128,7 @@ fn test_temp_range_neg10_to_39() {
 
     assert_eq!(dec.len(), temps.len(), "count mismatch");
     for (i, r) in dec.iter().enumerate() {
-        assert_eq!(r.temperature, temps[i], "mismatch at {}", i);
+        assert_eq!(r.value, temps[i], "mismatch at {}", i);
     }
 }
 
@@ -170,7 +170,7 @@ fn test_constant_temperature() {
 
     assert_eq!(decoded.len(), 10);
     for reading in &decoded {
-        assert_eq!(reading.temperature, 22);
+        assert_eq!(reading.value, 22);
     }
 }
 
@@ -188,7 +188,7 @@ fn test_small_deltas() {
 
     assert_eq!(decoded.len(), 5);
     for (i, reading) in decoded.iter().enumerate() {
-        assert_eq!(reading.temperature, temps[i], "mismatch at index {}", i);
+        assert_eq!(reading.value, temps[i], "mismatch at index {}", i);
     }
 }
 
@@ -204,9 +204,9 @@ fn test_medium_delta() {
     let decoded = encoder.decode();
 
     assert_eq!(decoded.len(), 3);
-    assert_eq!(decoded[0].temperature, 20);
-    assert_eq!(decoded[1].temperature, 25);
-    assert_eq!(decoded[2].temperature, 20);
+    assert_eq!(decoded[0].value, 20);
+    assert_eq!(decoded[1].value, 25);
+    assert_eq!(decoded[2].value, 20);
 }
 
 #[test]
@@ -221,9 +221,9 @@ fn test_large_delta() {
     let decoded = encoder.decode();
 
     assert_eq!(decoded.len(), 3);
-    assert_eq!(decoded[0].temperature, 20);
-    assert_eq!(decoded[1].temperature, 520);
-    assert_eq!(decoded[2].temperature, 20);
+    assert_eq!(decoded[0].value, 20);
+    assert_eq!(decoded[1].value, 520);
+    assert_eq!(decoded[2].value, 20);
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn test_long_zero_run() {
 
     assert_eq!(decoded.len(), 50);
     for reading in &decoded {
-        assert_eq!(reading.temperature, 22);
+        assert_eq!(reading.value, 22);
     }
 }
 
@@ -267,7 +267,7 @@ fn test_with_timestamp_jitter() {
     // Verify temperatures match and timestamps are quantized
     for (i, reading) in decoded.iter().enumerate() {
         assert_eq!(
-            reading.temperature, temps[i],
+            reading.value, temps[i],
             "temp mismatch at index {}",
             i
         );
@@ -317,7 +317,7 @@ fn test_with_larger_timestamp_jitter() {
     for (i, reading) in decoded.iter().enumerate() {
         assert_eq!(reading.ts, expected[i].0, "ts mismatch at index {}", i);
         assert_eq!(
-            reading.temperature, expected[i].1,
+            reading.value, expected[i].1,
             "temp mismatch at index {}",
             i
         );
@@ -376,9 +376,9 @@ fn test_specific_day_with_jitter() {
             i, reading.ts, expected[i].0
         );
         assert_eq!(
-            reading.temperature, expected[i].1,
+            reading.value, expected[i].1,
             "temp mismatch at index {}: got {}, expected {}",
-            i, reading.temperature, expected[i].1
+            i, reading.value, expected[i].1
         );
     }
 
@@ -421,8 +421,8 @@ fn test_out_of_order_readings_return_error() {
     let decoded = encoder.decode();
 
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].temperature, 24);
-    assert_eq!(decoded[1].temperature, 25);
+    assert_eq!(decoded[0].value, 24);
+    assert_eq!(decoded[1].value, 25);
 }
 
 #[test]
@@ -468,8 +468,8 @@ fn test_reading_before_base_ts_returns_error() {
 
     let decoded = encoder.decode();
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].temperature, 22);
-    assert_eq!(decoded[1].temperature, 23);
+    assert_eq!(decoded[0].value, 22);
+    assert_eq!(decoded[1].value, 23);
 }
 
 #[test]
@@ -726,8 +726,8 @@ fn test_duplicate_timestamps_averaged() {
 
     // Two intervals: first averaged (22+23+24)/3 = 23, second = 25
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].temperature, 23); // (22+23+24+1)/3 = 23 (round half up)
-    assert_eq!(decoded[1].temperature, 25);
+    assert_eq!(decoded[0].value, 23); // (22+23+24+1)/3 = 23 (round half up)
+    assert_eq!(decoded[1].value, 25);
 }
 
 #[test]
@@ -739,7 +739,7 @@ fn test_averaging_round_half_up() {
     encoder.append(base_ts, 22).unwrap();
     encoder.append(base_ts + 1, 23).unwrap();
     let decoded = encoder.decode();
-    assert_eq!(decoded[0].temperature, 23);
+    assert_eq!(decoded[0].value, 23);
 
     // Test case: 22 + 22 + 23 = 67, (67 + 1) / 3 = 22 (rounds down)
     let mut encoder = Encoder::new();
@@ -747,7 +747,7 @@ fn test_averaging_round_half_up() {
     encoder.append(base_ts + 1, 22).unwrap();
     encoder.append(base_ts + 2, 23).unwrap();
     let decoded = encoder.decode();
-    assert_eq!(decoded[0].temperature, 22);
+    assert_eq!(decoded[0].value, 22);
 
     // Test case: 20 + 21 + 22 + 23 = 86, (86 + 2) / 4 = 22
     let mut encoder = Encoder::new();
@@ -756,7 +756,7 @@ fn test_averaging_round_half_up() {
     encoder.append(base_ts + 2, 22).unwrap();
     encoder.append(base_ts + 3, 23).unwrap();
     let decoded = encoder.decode();
-    assert_eq!(decoded[0].temperature, 22);
+    assert_eq!(decoded[0].value, 22);
 
     // Test case: negative temperatures - (-16) + (-16) = -32, (-32 - 1) / 2 = -16
     // This tests that rounding works correctly for negative numbers
@@ -764,14 +764,14 @@ fn test_averaging_round_half_up() {
     encoder.append(base_ts, -16).unwrap();
     encoder.append(base_ts + 1, -16).unwrap();
     let decoded = encoder.decode();
-    assert_eq!(decoded[0].temperature, -16);
+    assert_eq!(decoded[0].value, -16);
 
     // Test case: negative with rounding - (-15) + (-16) = -31, (-31 - 1) / 2 = -16
     let mut encoder = Encoder::new();
     encoder.append(base_ts, -15).unwrap();
     encoder.append(base_ts + 1, -16).unwrap();
     let decoded = encoder.decode();
-    assert_eq!(decoded[0].temperature, -16); // rounds away from zero
+    assert_eq!(decoded[0].value, -16); // rounds away from zero
 }
 
 #[test]
@@ -805,9 +805,9 @@ fn test_alternating_readings_same_interval_averaged() {
     );
     for (i, reading) in decoded.iter().enumerate() {
         assert_eq!(
-            reading.temperature, 23,
+            reading.value, 23,
             "expected temp 23 at index {}, got {}",
-            i, reading.temperature
+            i, reading.value
         );
         assert_eq!(
             reading.ts,
@@ -845,9 +845,9 @@ fn test_custom_interval() {
     assert_eq!(decoded[0].ts, base_ts);
     assert_eq!(decoded[1].ts, base_ts + 60);
     assert_eq!(decoded[2].ts, base_ts + 120);
-    assert_eq!(decoded[0].temperature, 22);
-    assert_eq!(decoded[1].temperature, 23);
-    assert_eq!(decoded[2].temperature, 24);
+    assert_eq!(decoded[0].value, 22);
+    assert_eq!(decoded[1].value, 23);
+    assert_eq!(decoded[2].value, 24);
 
     // Test roundtrip via bytes
     let bytes = enc.to_bytes();
@@ -869,7 +869,7 @@ fn test_custom_interval_averaging() {
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 1);
-    assert_eq!(decoded[0].temperature, 22); // (20 + 24) / 2 = 22
+    assert_eq!(decoded[0].value, 22); // (20 + 24) / 2 = 22
 }
 
 #[test]
@@ -887,9 +887,9 @@ fn test_single_reading_per_interval_exact() {
     assert_eq!(decoded.len(), temps.len());
     for (i, reading) in decoded.iter().enumerate() {
         assert_eq!(
-            reading.temperature, temps[i],
+            reading.value, temps[i],
             "Single reading at interval {} should be exact: expected {}, got {}",
-            i, temps[i], reading.temperature
+            i, temps[i], reading.value
         );
     }
 }
@@ -957,16 +957,16 @@ fn test_extreme_temps_boundaries() {
     enc.append(base_ts, -500_000).unwrap();
     enc.append(base_ts + 300, -499_500).unwrap(); // delta = +500
     let decoded = enc.decode();
-    assert_eq!(decoded[0].temperature, -500_000);
-    assert_eq!(decoded[1].temperature, -499_500);
+    assert_eq!(decoded[0].value, -500_000);
+    assert_eq!(decoded[1].value, -499_500);
 
     // Test large positive first_temp
     let mut enc = Encoder::new();
     enc.append(base_ts, 500_000).unwrap();
     enc.append(base_ts + 300, 500_500).unwrap(); // delta = +500
     let decoded = enc.decode();
-    assert_eq!(decoded[0].temperature, 500_000);
-    assert_eq!(decoded[1].temperature, 500_500);
+    assert_eq!(decoded[0].value, 500_000);
+    assert_eq!(decoded[1].value, 500_500);
 
     // Test a sequence with various temps, all within ±1024 delta of each other
     let mut enc = Encoder::new();
@@ -979,9 +979,9 @@ fn test_extreme_temps_boundaries() {
     assert_eq!(decoded.len(), temps.len());
     for (i, reading) in decoded.iter().enumerate() {
         assert_eq!(
-            reading.temperature, temps[i],
+            reading.value, temps[i],
             "Extreme temp at index {}: expected {}, got {}",
-            i, temps[i], reading.temperature
+            i, temps[i], reading.value
         );
     }
 
@@ -992,9 +992,9 @@ fn test_extreme_temps_boundaries() {
     enc2.append(base_ts + 600, 0).unwrap(); // delta = -1023
 
     let decoded2 = enc2.decode();
-    assert_eq!(decoded2[0].temperature, 0);
-    assert_eq!(decoded2[1].temperature, 1023);
-    assert_eq!(decoded2[2].temperature, 0);
+    assert_eq!(decoded2[0].value, 0);
+    assert_eq!(decoded2[1].value, 1023);
+    assert_eq!(decoded2[2].value, 0);
 
     // Verify roundtrip via bytes works for large temperatures
     let mut enc3 = Encoder::new();
@@ -1002,8 +1002,8 @@ fn test_extreme_temps_boundaries() {
     enc3.append(base_ts + 300, 100_500).unwrap();
     let bytes = enc3.to_bytes();
     let decoded3 = decode(&bytes);
-    assert_eq!(decoded3[0].temperature, 100_000);
-    assert_eq!(decoded3[1].temperature, 100_500);
+    assert_eq!(decoded3[0].value, 100_000);
+    assert_eq!(decoded3[1].value, 100_500);
 }
 
 #[test]
@@ -1184,7 +1184,7 @@ fn test_decode_truncated_header() {
     header[13] = 1; // 300 high byte
     let decoded = decode(&header);
     assert_eq!(decoded.len(), 1);
-    assert_eq!(decoded[0].temperature, 22);
+    assert_eq!(decoded[0].value, 22);
 }
 
 #[test]
@@ -1248,7 +1248,7 @@ fn test_31_readings_same_interval() {
     // Sum = (20+21+22+23+24+25+26+27+28+29) * 3 + 20 = 245 * 3 + 20 = 755
     // Avg = 755 / 31 = 24.35... ≈ 24
     let expected_avg = (0..31).map(|i| 20 + (i % 10)).sum::<i32>() / 31;
-    assert_eq!(decoded[0].temperature, expected_avg);
+    assert_eq!(decoded[0].value, expected_avg);
 }
 
 #[test]
@@ -1268,7 +1268,7 @@ fn test_32_readings_same_interval() {
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
     // All 32 readings are now included in the average
-    assert_eq!(decoded[0].temperature, 20);
+    assert_eq!(decoded[0].value, 20);
 }
 
 #[test]
@@ -1289,7 +1289,7 @@ fn test_100_readings_same_interval() {
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
     // Average of 50 x 20 + 50 x 30 = 1000 + 1500 = 2500 / 100 = 25
-    assert_eq!(decoded[0].temperature, 25);
+    assert_eq!(decoded[0].value, 25);
 }
 
 #[test]
@@ -1308,7 +1308,7 @@ fn test_500_readings_same_interval() {
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].temperature, 22);
+    assert_eq!(decoded[0].value, 22);
 }
 
 #[test]
@@ -1332,7 +1332,7 @@ fn test_1023_readings_same_interval() {
     // Average of 1023 readings with temps 20-29 (102 complete cycles + partial)
     let expected_sum: i32 = (0..1023).map(|i| 20 + (i % 10)).sum();
     let expected_avg = expected_sum / 1023;
-    assert_eq!(decoded[0].temperature, expected_avg);
+    assert_eq!(decoded[0].value, expected_avg);
 }
 
 #[test]
@@ -1357,7 +1357,7 @@ fn test_1024_readings_same_interval() {
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
     // Average should be 20, the rejected 100 was not included
-    assert_eq!(decoded[0].temperature, 20);
+    assert_eq!(decoded[0].value, 20);
 }
 
 #[test]
@@ -1375,7 +1375,7 @@ fn test_high_count_with_large_temps() {
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].temperature, 500);
+    assert_eq!(decoded[0].value, 500);
 }
 
 #[test]
@@ -1393,7 +1393,7 @@ fn test_high_count_with_negative_temps() {
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].temperature, -500);
+    assert_eq!(decoded[0].value, -500);
 }
 
 #[test]
@@ -1413,7 +1413,7 @@ fn test_high_count_mixed_temps() {
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
     // Average of 200 x -100 + 200 x 100 = 0
-    assert_eq!(decoded[0].temperature, 0);
+    assert_eq!(decoded[0].value, 0);
 }
 
 #[test]
@@ -1429,7 +1429,7 @@ fn test_averaging_to_zero() {
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].temperature, 0);
+    assert_eq!(decoded[0].value, 0);
 
     // -50, -30, +40, +40 = sum 0, avg 0
     let mut enc = Encoder::new();
@@ -1441,7 +1441,7 @@ fn test_averaging_to_zero() {
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].temperature, 0);
+    assert_eq!(decoded[0].value, 0);
 }
 
 #[test]
@@ -1466,8 +1466,8 @@ fn test_delta_overflow_returns_error() {
         enc.append(base_ts + 900, 0),
         Err(AppendError::DeltaOverflow {
             delta: 2000,
-            prev_temp: 0,
-            new_temp: 2000
+            prev_value: 0,
+            new_value: 2000
         })
     ));
 
@@ -1481,8 +1481,8 @@ fn test_delta_overflow_returns_error() {
         enc.append(base_ts + 900, 0),
         Err(AppendError::DeltaOverflow {
             delta: -2000,
-            prev_temp: 2000,
-            new_temp: 0
+            prev_value: 2000,
+            new_value: 0
         })
     ));
 
@@ -1495,8 +1495,8 @@ fn test_delta_overflow_returns_error() {
         enc.append(base_ts + 900, 0),
         Err(AppendError::DeltaOverflow {
             delta: 1024,
-            prev_temp: 0,
-            new_temp: 1024
+            prev_value: 0,
+            new_value: 1024
         })
     ));
 
@@ -1509,8 +1509,8 @@ fn test_delta_overflow_returns_error() {
         enc.append(base_ts + 900, 0),
         Err(AppendError::DeltaOverflow {
             delta: -1025,
-            prev_temp: 1025,
-            new_temp: 0
+            prev_value: 1025,
+            new_value: 0
         })
     ));
 
