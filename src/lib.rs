@@ -2342,6 +2342,164 @@ mod tests {
         assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0].temperature, 0);
     }
+
+    #[test]
+    fn test_delta_overflow_panics() {
+        // Delta > 1023 or < -1024 should panic when encoding during interval crossing
+        // Note: Panic happens in encode_delta during finalize_pending_interval,
+        // which is called when crossing from one interval to another.
+        // We need at least 4 intervals to trigger this:
+        // - interval 0: establishes base
+        // - interval 1: first delta (from interval 0)
+        // - interval 2: large temp that will overflow
+        // - interval 3: triggers finalize of interval 2, causing panic
+        let base_ts = 1761955455u64;
+
+        // Test positive delta overflow: 0 to 2000 = delta of +2000 (out of range)
+        let result = std::panic::catch_unwind(|| {
+            let mut enc = Encoder::new();
+            enc.append(base_ts, 0);         // interval 0
+            enc.append(base_ts + 300, 0);   // interval 1
+            enc.append(base_ts + 600, 2000); // interval 2: temp=2000
+            enc.append(base_ts + 900, 0);   // interval 3: triggers finalize(2), delta=2000
+        });
+        assert!(result.is_err(), "Expected panic for delta +2000");
+
+        // Test negative delta overflow: 2000 to 0 = delta of -2000 (out of range)
+        let result = std::panic::catch_unwind(|| {
+            let mut enc = Encoder::new();
+            enc.append(base_ts, 2000);       // interval 0
+            enc.append(base_ts + 300, 2000); // interval 1
+            enc.append(base_ts + 600, 0);    // interval 2: temp=0
+            enc.append(base_ts + 900, 0);    // interval 3: triggers finalize(2), delta=-2000
+        });
+        assert!(result.is_err(), "Expected panic for delta -2000");
+
+        // Test boundary: delta of exactly +1024 should panic
+        let result = std::panic::catch_unwind(|| {
+            let mut enc = Encoder::new();
+            enc.append(base_ts, 0);
+            enc.append(base_ts + 300, 0);
+            enc.append(base_ts + 600, 1024); // delta will be +1024
+            enc.append(base_ts + 900, 0);
+        });
+        assert!(result.is_err(), "Expected panic for delta +1024");
+
+        // Test boundary: delta of exactly -1025 should panic
+        let result = std::panic::catch_unwind(|| {
+            let mut enc = Encoder::new();
+            enc.append(base_ts, 1025);
+            enc.append(base_ts + 300, 1025);
+            enc.append(base_ts + 600, 0); // delta will be -1025
+            enc.append(base_ts + 900, 0);
+        });
+        assert!(result.is_err(), "Expected panic for delta -1025");
+
+        // Test boundary: delta of exactly +1023 should NOT panic
+        let result = std::panic::catch_unwind(|| {
+            let mut enc = Encoder::new();
+            enc.append(base_ts, 0);
+            enc.append(base_ts + 300, 0);
+            enc.append(base_ts + 600, 1023); // delta will be +1023
+            enc.append(base_ts + 900, 0);
+        });
+        assert!(result.is_ok(), "Delta +1023 should not panic");
+
+        // Test boundary: delta of exactly -1024 should NOT panic
+        let result = std::panic::catch_unwind(|| {
+            let mut enc = Encoder::new();
+            enc.append(base_ts, 1024);
+            enc.append(base_ts + 300, 1024);
+            enc.append(base_ts + 600, 0); // delta will be -1024
+            enc.append(base_ts + 900, 0);
+        });
+        assert!(result.is_ok(), "Delta -1024 should not panic");
+    }
+
+    #[test]
+    fn test_sentinel_value_creates_gap() {
+        // SENTINEL_VALUE (-1000) should not be stored, used to represent gaps
+        let base_ts = 1761955455u64;
+        let mut enc = Encoder::new();
+
+        enc.append(base_ts, 22);
+        enc.append(base_ts + 300, SENTINEL_VALUE); // Gap
+        enc.append(base_ts + 600, 24);
+
+        let decoded = enc.decode();
+        assert_eq!(decoded.len(), 2, "SENTINEL_VALUE should not create a reading");
+        assert_eq!(decoded[0].temperature, 22);
+        assert_eq!(decoded[1].temperature, 24);
+        // Gap is preserved in timestamps
+        assert_eq!(decoded[1].ts - decoded[0].ts, 600);
+    }
+
+    #[test]
+    fn test_sentinel_value_as_first_reading() {
+        // SENTINEL_VALUE as first reading should be ignored
+        let base_ts = 1761955455u64;
+        let mut enc = Encoder::new();
+
+        enc.append(base_ts, SENTINEL_VALUE); // Should be ignored
+        enc.append(base_ts + 300, 22);
+        enc.append(base_ts + 600, 24);
+
+        let decoded = enc.decode();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].ts, base_ts + 300); // First actual reading
+        assert_eq!(decoded[0].temperature, 22);
+    }
+
+    #[test]
+    fn test_interval_zero_encoder() {
+        // Creating encoder with interval=0 is questionable but shouldn't crash during creation
+        // The behavior during append may vary (division by zero)
+        let enc = Encoder::with_interval(0);
+        assert_eq!(enc.count(), 0);
+        // Don't try to append - would cause division by zero
+    }
+
+    #[test]
+    fn test_max_interval_65535() {
+        // Test maximum interval value
+        let base_ts = 1761955455u64;
+        let mut enc = Encoder::with_interval(65535);
+
+        enc.append(base_ts, 22);
+        enc.append(base_ts + 65535, 23); // Exactly one interval later
+        enc.append(base_ts + 65535 * 2, 24); // Two intervals later
+
+        let decoded = enc.decode();
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[1].ts - decoded[0].ts, 65535);
+        assert_eq!(decoded[2].ts - decoded[1].ts, 65535);
+    }
+
+    #[test]
+    fn test_timestamp_at_epoch_base() {
+        // Timestamp exactly at EPOCH_BASE should work
+        let mut enc = Encoder::new();
+        enc.append(1_760_000_000, 22); // Exactly EPOCH_BASE
+        enc.append(1_760_000_300, 23);
+
+        let decoded = enc.decode();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].ts, 1_760_000_000);
+    }
+
+    #[test]
+    fn test_count_at_max_u16() {
+        // Test that count() returns correct value at max
+        let base_ts = 1761955455u64;
+        let mut enc = Encoder::with_interval(1);
+
+        // Add exactly 65535 readings
+        for i in 0..65535u64 {
+            enc.append(base_ts + i, 22);
+        }
+
+        assert_eq!(enc.count(), 65535);
+    }
 }
 
 #[cfg(test)]

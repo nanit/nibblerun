@@ -10,28 +10,160 @@ A high-performance time series compression library for Rust, optimized for tempe
 - Automatic averaging of multiple readings within the same interval
 - ~250M readings/second encoding throughput
 
-## Usage
+## Example
 
 ```rust
 use nibblerun::{Encoder, decode};
 
-// Create encoder with 300-second intervals
+// Create encoder with 5-minute (300-second) intervals
 let mut enc = Encoder::with_interval(300);
 
 // Append readings (timestamp, temperature)
-enc.append(1700000000, 23);
-enc.append(1700000300, 24);
-enc.append(1700000600, 22);
+// Readings are quantized to interval boundaries
+enc.append(1700000000, 23);  // 00:00:00 -> interval 0
+enc.append(1700000150, 25);  // 00:02:30 -> same interval, averaged with above
+enc.append(1700000300, 24);  // 00:05:00 -> interval 1
+enc.append(1700000600, 22);  // 00:10:00 -> interval 2
 
 // Serialize to bytes
 let bytes = enc.to_bytes();
+println!("Compressed size: {} bytes", bytes.len());
 
 // Decode back
 let readings = decode(&bytes);
 for r in readings {
     println!("ts: {}, temp: {}", r.ts, r.temperature);
 }
+// Output:
+// ts: 1700000000, temp: 24  (average of 23 and 25)
+// ts: 1700000300, temp: 24
+// ts: 1700000600, temp: 22
 ```
+
+### Handling Gaps
+
+Missing intervals are preserved in the output:
+
+```rust
+use nibblerun::Encoder;
+
+let mut enc = Encoder::with_interval(300);
+
+enc.append(1700000000, 22);   // 00:00 - interval 0
+enc.append(1700000300, 23);   // 00:05 - interval 1
+// No data for 00:10, 00:15, 00:20...
+enc.append(1700003000, 25);   // 00:50 - interval 10
+
+let readings = enc.decode();
+assert_eq!(readings.len(), 3);
+assert_eq!(readings[2].ts - readings[1].ts, 2700); // 45-minute gap preserved
+```
+
+## How It Works
+
+### Timestamp Quantization
+
+Timestamps are quantized to configurable intervals (default: 300 seconds). The first reading's timestamp becomes the base, and all subsequent readings are mapped to interval indices:
+
+```
+interval_idx = (timestamp - base_ts) / interval
+```
+
+Multiple readings in the same interval are averaged together.
+
+### Delta Encoding
+
+Temperature values are stored as deltas from the previous reading. Deltas are encoded with variable-length bit codes optimized for typical temperature data:
+
+| Delta | Encoding | Bits |
+|-------|----------|------|
+| 0 (repeated) | `0` | 1 |
+| ±1 | `10x` | 3 |
+| ±2 | `111110x` | 7 |
+| ±3 to ±10 | `1111110xxxx` | 11 |
+| ±11 to ±1023 | `11111110xxxxxxxxxxx` | 19 |
+
+### Zero-Run Encoding
+
+Consecutive zero deltas (unchanged temperatures) use run-length encoding:
+
+| Run Length | Encoding | Bits |
+|------------|----------|------|
+| 1 | `0` | 1 |
+| 2-5 | `110xx` | 5 |
+| 6-21 | `1110xxxx` | 8 |
+| 22-149 | `11110xxxxxxx` | 12 |
+
+### Wire Format
+
+The encoded format consists of a 14-byte header followed by bit-packed data:
+
+```
+Header (14 bytes):
+┌─────────────────┬─────────┬─────────┬────────────┬──────────┐
+│ base_ts_offset  │duration │  count  │ first_temp │ interval │
+│    (4 bytes)    │(2 bytes)│(2 bytes)│  (4 bytes) │ (2 bytes)│
+└─────────────────┴─────────┴─────────┴────────────┴──────────┘
+
+Data: Variable-length bit-packed deltas and zero-runs
+```
+
+- `base_ts_offset`: First timestamp minus epoch base (1,760,000,000)
+- `duration`: Number of intervals spanned
+- `count`: Number of readings (max 65,535)
+- `first_temp`: First temperature as i32
+- `interval`: Interval in seconds (1-65,535)
+
+### Memory Layout
+
+The `Encoder` struct is optimized for cache efficiency (72 bytes):
+
+```rust
+Encoder {
+    base_ts: u64,        // First timestamp
+    last_ts: u64,        // Most recent timestamp
+    bit_accum: u64,      // Bit accumulator for encoding
+    pending_state: u64,  // Packed: bit count + pending avg state
+    data: Vec<u8>,       // Encoded output buffer
+    prev_temp: i32,      // Previous temperature (for delta)
+    first_temp: i32,     // First temperature (for header)
+    zero_run: u32,       // Current zero-run length
+    prev_logical_idx: u32, // Previous interval index
+    count: u16,          // Reading count
+    interval: u16,       // Interval in seconds
+}
+```
+
+The `pending_state` field packs multiple values to avoid extra fields:
+- Bits 0-5: Bit accumulator count (0-63)
+- Bits 6-15: Pending reading count for averaging (0-1023)
+- Bits 16-47: Pending sum for averaging (full i32 range)
+
+## Assumptions and Limitations
+
+### Assumptions
+
+- **Timestamps are monotonically increasing**: Out-of-order readings are silently dropped
+- **Timestamps are Unix seconds**: The library uses an epoch base of 1,760,000,000 (~2025)
+- **Temperature changes are gradual**: The encoding is optimized for small deltas (±10)
+
+### Limitations
+
+| Limit | Value | Notes |
+|-------|-------|-------|
+| Max readings per encoder | 65,535 | `count` is u16 |
+| Max delta between readings | ±1,023 | Larger deltas panic |
+| Max readings per interval | 1,023 | Additional readings ignored |
+| Min timestamp | 1,760,000,000 | ~2025-10-09, panics if earlier |
+| Interval range | 1-65,535 seconds | ~18 hours max |
+| Reserved temperature | -1000 | `SENTINEL_VALUE` for gaps |
+
+### Performance Characteristics
+
+- **Encoding**: O(1) per reading, ~250M readings/second
+- **Decoding**: O(n) where n = reading count
+- **Compression**: ~40-50 bytes/day for typical temperature data (vs ~3.5KB raw)
+- **Memory**: 72 bytes per encoder + output buffer
 
 ## Testing
 
