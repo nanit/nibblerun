@@ -2543,5 +2543,173 @@ mod proptests {
                     i, temps[i], reading.temperature);
             }
         }
+
+        /// Property: multiple readings in the same interval are averaged correctly
+        /// The decoded temperature should equal the arithmetic mean (rounded)
+        #[test]
+        fn prop_averaging_within_interval(
+            interval in prop::sample::select(vec![300u16, 600, 3600]),
+            // Generate 1-20 intervals, each with 1-50 readings
+            interval_temps in prop::collection::vec(
+                prop::collection::vec(-500i32..500, 1..50),
+                1..20
+            ),
+        ) {
+            let mut enc = Encoder::with_interval(interval);
+
+            // For each interval, add all its readings within the interval window
+            for (interval_idx, temps) in interval_temps.iter().enumerate() {
+                let interval_start = BASE_TS + (interval_idx as u64) * (interval as u64);
+                for (j, &temp) in temps.iter().enumerate() {
+                    // Spread readings within the interval
+                    let offset = (j as u64) % (interval as u64);
+                    enc.append(interval_start + offset, temp);
+                }
+            }
+
+            let decoded = enc.decode();
+            prop_assert_eq!(decoded.len(), interval_temps.len(),
+                "Expected {} intervals, got {}", interval_temps.len(), decoded.len());
+
+            // Verify each decoded reading is the correct average
+            for (i, (reading, temps)) in decoded.iter().zip(interval_temps.iter()).enumerate() {
+                let sum: i32 = temps.iter().sum();
+                let count = temps.len() as i32;
+                // Round half away from zero (same as rounded_avg)
+                let expected_avg = if sum >= 0 {
+                    (sum + count / 2) / count
+                } else {
+                    (sum - count / 2) / count
+                };
+
+                prop_assert_eq!(reading.temperature, expected_avg,
+                    "Interval {}: expected avg {} (sum={}, count={}), got {}",
+                    i, expected_avg, sum, count, reading.temperature);
+            }
+        }
+
+        /// Property: timestamps are quantized to interval boundaries
+        /// Input timestamps with jitter should produce output timestamps aligned to intervals
+        #[test]
+        fn prop_timestamp_quantization(
+            interval in prop::sample::select(vec![60u16, 300, 600]),
+            // Generate readings with random jitter within each interval
+            readings_per_interval in prop::collection::vec(1u8..5, 1..50),
+        ) {
+            let mut enc = Encoder::with_interval(interval);
+            let mut expected_intervals = Vec::new();
+
+            for (interval_idx, &count) in readings_per_interval.iter().enumerate() {
+                let interval_start = BASE_TS + (interval_idx as u64) * (interval as u64);
+                expected_intervals.push(interval_start);
+
+                for j in 0..count {
+                    // Add jitter within interval bounds
+                    let jitter = (j as u64 * 17) % (interval as u64);
+                    enc.append(interval_start + jitter, 22);
+                }
+            }
+
+            let decoded = enc.decode();
+            prop_assert_eq!(decoded.len(), expected_intervals.len(),
+                "Expected {} readings, got {}", expected_intervals.len(), decoded.len());
+
+            for (reading, &expected_ts) in decoded.iter().zip(expected_intervals.iter()) {
+                prop_assert_eq!(reading.ts, expected_ts,
+                    "Expected timestamp {}, got {}", expected_ts, reading.ts);
+            }
+        }
+
+        /// Property: gaps in input timestamps are preserved in output
+        /// If we skip intervals in the input, the output should reflect those gaps
+        #[test]
+        fn prop_gap_preservation(
+            interval in prop::sample::select(vec![60u16, 300, 600]),
+            // Generate a list of interval indices (sorted, unique) to have readings
+            interval_indices in prop::collection::btree_set(0u64..100, 1..30),
+        ) {
+            let mut enc = Encoder::with_interval(interval);
+            let indices: Vec<u64> = interval_indices.into_iter().collect();
+
+            // Add one reading per selected interval
+            for &idx in &indices {
+                let ts = BASE_TS + idx * (interval as u64);
+                enc.append(ts, 22);
+            }
+
+            let decoded = enc.decode();
+            prop_assert_eq!(decoded.len(), indices.len(),
+                "Expected {} readings, got {}", indices.len(), decoded.len());
+
+            // Verify timestamps match the expected intervals (with gaps)
+            for (reading, &expected_idx) in decoded.iter().zip(indices.iter()) {
+                let expected_ts = BASE_TS + expected_idx * (interval as u64);
+                prop_assert_eq!(reading.ts, expected_ts,
+                    "Expected timestamp {} (interval {}), got {} (interval {})",
+                    expected_ts, expected_idx, reading.ts,
+                    (reading.ts - BASE_TS) / (interval as u64));
+            }
+
+            // Verify gaps: consecutive readings should have timestamp difference
+            // equal to (index_diff * interval)
+            for (i, window) in decoded.windows(2).enumerate() {
+                let ts_diff = window[1].ts - window[0].ts;
+                let idx_diff = indices[i + 1] - indices[i];
+                let expected_diff = idx_diff * (interval as u64);
+
+                prop_assert_eq!(ts_diff, expected_diff,
+                    "Gap between readings {} and {}: expected {} seconds ({} intervals), got {} seconds",
+                    i, i + 1, expected_diff, idx_diff, ts_diff);
+            }
+        }
+
+        /// Property: decoded count equals number of unique intervals in input
+        /// Multiple readings in the same interval count as one
+        #[test]
+        fn prop_interval_deduplication(
+            interval in prop::sample::select(vec![300u16, 600]),
+            // Generate timestamps that may fall into same or different intervals
+            timestamps in prop::collection::vec(0u64..10000, 1..100),
+        ) {
+            if timestamps.is_empty() {
+                return Ok(());
+            }
+
+            let mut enc = Encoder::with_interval(interval);
+
+            // Add readings at each timestamp
+            for &ts_offset in &timestamps {
+                enc.append(BASE_TS + ts_offset, 22);
+            }
+
+            let decoded = enc.decode();
+
+            // Calculate expected unique intervals relative to the FIRST timestamp (base_ts)
+            // The encoder uses the first reading's timestamp as base_ts
+            let base_offset = timestamps[0];
+            let mut unique_intervals = std::collections::BTreeSet::new();
+            let mut prev_idx: Option<u64> = None;
+
+            for &ts_offset in &timestamps {
+                // Skip timestamps before base (would be rejected by encoder)
+                if ts_offset < base_offset {
+                    continue;
+                }
+                let idx = (ts_offset - base_offset) / (interval as u64);
+                // Only count if it's the first or advances the index (encoder skips backwards)
+                if prev_idx.is_none() || idx > prev_idx.unwrap() {
+                    unique_intervals.insert(idx);
+                    prev_idx = Some(idx);
+                }
+                // Same interval: still update prev_idx for tracking
+                if prev_idx == Some(idx) {
+                    prev_idx = Some(idx);
+                }
+            }
+
+            prop_assert_eq!(decoded.len(), unique_intervals.len(),
+                "Expected {} unique intervals, got {} decoded readings. timestamps={:?}, base_offset={}, interval={}",
+                unique_intervals.len(), decoded.len(), timestamps, base_offset, interval);
+        }
     }
 }
