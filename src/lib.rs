@@ -82,15 +82,10 @@ pub const DEFAULT_INTERVAL: u64 = 300;
 /// Header size in bytes
 const HEADER_SIZE: usize = 10;
 
-/// Fast division by 300 using multiplication by reciprocal
-/// floor(x * 223697 / 2^26) = floor(x / 300) for x <= 200000
+/// Division by interval (300 seconds)
 #[inline]
 fn fast_div_300(x: u64) -> u64 {
-    if x <= 200_000 {
-        (x * 223_697) >> 26
-    } else {
-        x / 300
-    }
+    x / 300
 }
 
 /// Offset for storing signed sum in unsigned bits (±1M range)
