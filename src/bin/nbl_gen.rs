@@ -49,7 +49,7 @@ struct Args {
 
 /// Read timestamp,value pairs from a CSV file
 fn read_csv(path: &PathBuf) -> Result<Vec<(u64, i32)>, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open CSV: {}", e))?;
+    let file = File::open(path).map_err(|e| format!("Failed to open CSV: {e}"))?;
     let reader = BufReader::new(file);
     let mut readings = Vec::new();
 
@@ -104,7 +104,7 @@ fn main() {
         let readings = match read_csv(csv_path) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         };
@@ -113,7 +113,7 @@ fn main() {
 
         for (i, (ts, value)) in readings.iter().enumerate() {
             if let Err(e) = enc.append(*ts, *value) {
-                eprintln!("Warning: Failed to append reading {} (ts={}, value={}): {}", i, ts, value, e);
+                eprintln!("Warning: Failed to append reading {i} (ts={ts}, value={value}): {e}");
             }
         }
     } else {
@@ -122,7 +122,7 @@ fn main() {
 
         // Base timestamp: start of a day at EPOCH_BASE
         let base_ts: u64 = 1_760_000_000;
-        let interval = args.interval as u64;
+        let interval = u64::from(args.interval);
 
         let mut current_idx: u64 = 0;
 
@@ -137,13 +137,13 @@ fn main() {
 
             // Calculate temperature based on time of day
             // Simulates: cooler at night, warmer during day
-            let hour = (current_idx * args.interval as u64 / 3600) % 24;
-            let hour_f = hour as f64 + (current_idx as f64 * args.interval as f64 % 3600.0) / 3600.0;
+            let hour = (current_idx * u64::from(args.interval) / 3600) % 24;
+            let hour_f = hour as f64 + (current_idx as f64 * f64::from(args.interval) % 3600.0) / 3600.0;
 
             // Temperature curve: min at 5am, max at 3pm
             // Using sine wave: base + amplitude * sin((hour - 5) * π / 12 - π/2)
             let temp_variation = 4.0 * ((hour_f - 5.0) * PI / 12.0 - PI / 2.0).sin();
-            let base = args.base_temp as f64 + temp_variation;
+            let base = f64::from(args.base_temp) + temp_variation;
 
             // Add small random jitter (±1-2°C)
             let jitter: f64 = rng.random_range(-2.0..=2.0);
@@ -157,7 +157,7 @@ fn main() {
             }
 
             if let Err(e) = enc.append(ts, temp) {
-                eprintln!("Warning: Failed to append reading {}: {}", i, e);
+                eprintln!("Warning: Failed to append reading {i}: {e}");
             }
 
             current_idx += 1;

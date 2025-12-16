@@ -43,17 +43,17 @@ pub trait Value: private::Sealed + Copy + Debug + PartialEq + Default {
 
 impl Value for i8 {
     const BYTES: usize = 1;
-    const MIN: i32 = i8::MIN as i32;
-    const MAX: i32 = i8::MAX as i32;
+    const MIN: i32 = Self::MIN as i32;
+    const MAX: i32 = Self::MAX as i32;
 
     #[inline]
     fn to_i32(self) -> i32 {
-        self as i32
+        i32::from(self)
     }
 
     #[inline]
     fn from_i32(v: i32) -> Self {
-        v as i8
+        v as Self
     }
 
     #[inline]
@@ -63,23 +63,23 @@ impl Value for i8 {
 
     #[inline]
     fn read_le(buf: &[u8]) -> Self {
-        buf[0] as i8
+        buf[0] as Self
     }
 }
 
 impl Value for i16 {
     const BYTES: usize = 2;
-    const MIN: i32 = i16::MIN as i32;
-    const MAX: i32 = i16::MAX as i32;
+    const MIN: i32 = Self::MIN as i32;
+    const MAX: i32 = Self::MAX as i32;
 
     #[inline]
     fn to_i32(self) -> i32 {
-        self as i32
+        i32::from(self)
     }
 
     #[inline]
     fn from_i32(v: i32) -> Self {
-        v as i16
+        v as Self
     }
 
     #[inline]
@@ -91,14 +91,14 @@ impl Value for i16 {
 
     #[inline]
     fn read_le(buf: &[u8]) -> Self {
-        i16::from_le_bytes([buf[0], buf[1]])
+        Self::from_le_bytes([buf[0], buf[1]])
     }
 }
 
 impl Value for i32 {
     const BYTES: usize = 4;
-    const MIN: i32 = i32::MIN;
-    const MAX: i32 = i32::MAX;
+    const MIN: Self = Self::MIN;
+    const MAX: Self = Self::MAX;
 
     #[inline]
     fn to_i32(self) -> i32 {
@@ -121,7 +121,7 @@ impl Value for i32 {
 
     #[inline]
     fn read_le(buf: &[u8]) -> Self {
-        i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+        Self::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
     }
 }
 

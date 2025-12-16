@@ -210,7 +210,7 @@ impl<'a> BitReader<'a> {
     }
 
     #[inline]
-    fn has_more(&self) -> bool {
+    const fn has_more(&self) -> bool {
         self.left > 0 || self.pos < self.buf.len()
     }
 }

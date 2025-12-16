@@ -80,37 +80,37 @@ enum SpanKind {
 }
 
 impl SpanKind {
-    fn color(&self) -> &'static str {
+    const fn color(&self) -> &'static str {
         match self {
-            SpanKind::HeaderBaseTs(_)
-            | SpanKind::HeaderCount(_)
-            | SpanKind::HeaderFirstValue(_) => colors::HEADER,
-            SpanKind::Zero => colors::ZERO,
-            SpanKind::ZeroRun8_21(_) => colors::ZERO_RUN_8_21,
-            SpanKind::ZeroRun22_149(_) => colors::ZERO_RUN_22_149,
-            SpanKind::Delta1(_) => colors::DELTA_1,
-            SpanKind::Delta2(_) => colors::DELTA_2,
-            SpanKind::Delta3_10(_) => colors::DELTA_3_10,
-            SpanKind::LargeDelta(_) => colors::LARGE_DELTA,
-            SpanKind::SingleGap => colors::GAP,
-            SpanKind::Gap(_) => colors::GAP,
+            Self::HeaderBaseTs(_)
+            | Self::HeaderCount(_)
+            | Self::HeaderFirstValue(_) => colors::HEADER,
+            Self::Zero => colors::ZERO,
+            Self::ZeroRun8_21(_) => colors::ZERO_RUN_8_21,
+            Self::ZeroRun22_149(_) => colors::ZERO_RUN_22_149,
+            Self::Delta1(_) => colors::DELTA_1,
+            Self::Delta2(_) => colors::DELTA_2,
+            Self::Delta3_10(_) => colors::DELTA_3_10,
+            Self::LargeDelta(_) => colors::LARGE_DELTA,
+            Self::SingleGap => colors::GAP,
+            Self::Gap(_) => colors::GAP,
         }
     }
 
     fn label(&self) -> String {
         match self {
-            SpanKind::HeaderBaseTs(v) => format!("base_ts: {v}"),
-            SpanKind::HeaderCount(v) => format!("count: {v}"),
-            SpanKind::HeaderFirstValue(v) => format!("first_val: {v}"),
-            SpanKind::Zero => "=0".to_string(),
-            SpanKind::ZeroRun8_21(n) => format!("run={n}"),
-            SpanKind::ZeroRun22_149(n) => format!("run={n}"),
-            SpanKind::Delta1(d) => format!("{d:+}"),
-            SpanKind::Delta2(d) => format!("{d:+}"),
-            SpanKind::Delta3_10(d) => format!("{d:+}"),
-            SpanKind::LargeDelta(d) => format!("{d:+}"),
-            SpanKind::SingleGap => "gap=1".to_string(),
-            SpanKind::Gap(n) => format!("gap={n}"),
+            Self::HeaderBaseTs(v) => format!("base_ts: {v}"),
+            Self::HeaderCount(v) => format!("count: {v}"),
+            Self::HeaderFirstValue(v) => format!("first_val: {v}"),
+            Self::Zero => "=0".to_string(),
+            Self::ZeroRun8_21(n) => format!("run={n}"),
+            Self::ZeroRun22_149(n) => format!("run={n}"),
+            Self::Delta1(d) => format!("{d:+}"),
+            Self::Delta2(d) => format!("{d:+}"),
+            Self::Delta3_10(d) => format!("{d:+}"),
+            Self::LargeDelta(d) => format!("{d:+}"),
+            Self::SingleGap => "gap=1".to_string(),
+            Self::Gap(n) => format!("gap={n}"),
         }
     }
 
@@ -118,18 +118,18 @@ impl SpanKind {
     fn tooltip_text(&self, ts: u64, value: i32) -> String {
         let ts_str = format_timestamp(ts);
         match self {
-            SpanKind::HeaderBaseTs(v) => format!("base_ts: {} ({})", v, format_timestamp(*v)),
-            SpanKind::HeaderCount(v) => format!("count: {} readings", v),
-            SpanKind::HeaderFirstValue(v) => format!("first_value: {}", v),
-            SpanKind::Zero => format!("{} val={} (=0)", ts_str, value),
-            SpanKind::ZeroRun8_21(n) => format!("{} val={} run={}", ts_str, value, n),
-            SpanKind::ZeroRun22_149(n) => format!("{} val={} run={}", ts_str, value, n),
-            SpanKind::Delta1(d) => format!("{} val={} ({:+})", ts_str, value, d),
-            SpanKind::Delta2(d) => format!("{} val={} ({:+})", ts_str, value, d),
-            SpanKind::Delta3_10(d) => format!("{} val={} ({:+})", ts_str, value, d),
-            SpanKind::LargeDelta(d) => format!("{} val={} ({:+})", ts_str, value, d),
-            SpanKind::SingleGap => "gap: 1 interval".to_string(),
-            SpanKind::Gap(n) => format!("gap: {} intervals", n),
+            Self::HeaderBaseTs(v) => format!("base_ts: {} ({})", v, format_timestamp(*v)),
+            Self::HeaderCount(v) => format!("count: {v} readings"),
+            Self::HeaderFirstValue(v) => format!("first_value: {v}"),
+            Self::Zero => format!("{ts_str} val={value} (=0)"),
+            Self::ZeroRun8_21(n) => format!("{ts_str} val={value} run={n}"),
+            Self::ZeroRun22_149(n) => format!("{ts_str} val={value} run={n}"),
+            Self::Delta1(d) => format!("{ts_str} val={value} ({d:+})"),
+            Self::Delta2(d) => format!("{ts_str} val={value} ({d:+})"),
+            Self::Delta3_10(d) => format!("{ts_str} val={value} ({d:+})"),
+            Self::LargeDelta(d) => format!("{ts_str} val={value} ({d:+})"),
+            Self::SingleGap => "gap: 1 interval".to_string(),
+            Self::Gap(n) => format!("gap: {n} intervals"),
         }
     }
 
@@ -137,31 +137,31 @@ impl SpanKind {
     /// Returns a list of "timestamp → value" strings
     fn decoded_readings(&self, start_ts: u64, value: i32, interval: u16) -> Vec<String> {
         match self {
-            SpanKind::HeaderBaseTs(_)
-            | SpanKind::HeaderCount(_)
-            | SpanKind::HeaderFirstValue(_) => vec![],
-            SpanKind::Zero => {
+            Self::HeaderBaseTs(_)
+            | Self::HeaderCount(_)
+            | Self::HeaderFirstValue(_) => vec![],
+            Self::Zero => {
                 vec![format!("{} → {}", format_timestamp(start_ts), value)]
             }
-            SpanKind::ZeroRun8_21(n) | SpanKind::ZeroRun22_149(n) => {
+            Self::ZeroRun8_21(n) | Self::ZeroRun22_149(n) => {
                 let mut readings = Vec::new();
-                for i in 0..*n as u64 {
-                    let ts = start_ts + i * interval as u64;
+                for i in 0..u64::from(*n) {
+                    let ts = start_ts + i * u64::from(interval);
                     readings.push(format!("{} → {}", format_timestamp(ts), value));
                 }
                 readings
             }
-            SpanKind::Delta1(d) | SpanKind::Delta2(d) | SpanKind::Delta3_10(d) | SpanKind::LargeDelta(d) => {
+            Self::Delta1(d) | Self::Delta2(d) | Self::Delta3_10(d) | Self::LargeDelta(d) => {
                 let new_value = value + d;
                 vec![format!("{} → {}", format_timestamp(start_ts), new_value)]
             }
-            SpanKind::SingleGap => {
+            Self::SingleGap => {
                 vec![format!("{} → (gap)", format_timestamp(start_ts))]
             }
-            SpanKind::Gap(n) => {
+            Self::Gap(n) => {
                 let mut readings = Vec::new();
-                for i in 0..*n as u64 {
-                    let ts = start_ts + i * interval as u64;
+                for i in 0..u64::from(*n) {
+                    let ts = start_ts + i * u64::from(interval);
                     readings.push(format!("{} → (gap)", format_timestamp(ts)));
                 }
                 readings
@@ -209,7 +209,7 @@ struct BitReader<'a> {
 }
 
 impl<'a> BitReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, bit_pos: 0 }
     }
 
@@ -227,11 +227,11 @@ impl<'a> BitReader<'a> {
         result
     }
 
-    fn has_more(&self) -> bool {
+    const fn has_more(&self) -> bool {
         self.bit_pos / 8 < self.bytes.len()
     }
 
-    fn pos(&self) -> usize {
+    const fn pos(&self) -> usize {
         self.bit_pos
     }
 }
@@ -491,7 +491,7 @@ fn build_rows(
     for span in data_spans {
         match &span.kind {
             SpanKind::Zero => {
-                let ts = base_ts + idx * interval as u64;
+                let ts = base_ts + idx * u64::from(interval);
                 let value_i8 = value as i8;
                 let gt = csv_readings.and_then(|readings| {
                     readings.get(csv_idx).map(|r| GroundTruth {
@@ -515,7 +515,7 @@ fn build_rows(
             SpanKind::ZeroRun8_21(n) | SpanKind::ZeroRun22_149(n) => {
                 let value_i8 = value as i8;
                 for i in 0..*n {
-                    let ts = base_ts + idx * interval as u64;
+                    let ts = base_ts + idx * u64::from(interval);
                     let show_bits = i == 0;
                     let gt = csv_readings.and_then(|readings| {
                         readings.get(csv_idx).map(|r| GroundTruth {
@@ -539,7 +539,7 @@ fn build_rows(
             }
             SpanKind::Delta1(d) | SpanKind::Delta2(d) | SpanKind::Delta3_10(d) | SpanKind::LargeDelta(d) => {
                 value += d;
-                let ts = base_ts + idx * interval as u64;
+                let ts = base_ts + idx * u64::from(interval);
                 let value_i8 = value as i8;
                 let gt = csv_readings.and_then(|readings| {
                     readings.get(csv_idx).map(|r| GroundTruth {
@@ -571,10 +571,10 @@ fn build_rows(
             SpanKind::Gap(n) => {
                 rows.push(Row {
                     kind: RowKind::Gap { span_id: span.id },
-                    left_text: format!("─── gap: {} intervals ───", n),
+                    left_text: format!("─── gap: {n} intervals ───"),
                     ground_truth: None,
                 });
-                idx += *n as u64;
+                idx += u64::from(*n);
             }
             _ => {}
         }
@@ -585,7 +585,7 @@ fn build_rows(
 
 fn format_event(num: usize, ts: u64, value: i32, delta: &str) -> String {
     let time_str = format_timestamp(ts);
-    format!("#{:<3} {}  val={:<4} {}", num, time_str, value, delta)
+    format!("#{num:<3} {time_str}  val={value:<4} {delta}")
 }
 
 /// Format a unix timestamp as human-readable date/time
@@ -605,8 +605,7 @@ fn format_timestamp(ts: u64) -> String {
     let (year, month, day) = days_to_ymd(days_since_epoch);
 
     format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        year, month, day, hours, mins, secs
+        "{year:04}-{month:02}-{day:02} {hours:02}:{mins:02}:{secs:02}"
     )
 }
 
@@ -647,8 +646,8 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
     (year, month, day)
 }
 
-fn is_leap_year(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+const fn is_leap_year(year: u32) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 fn get_bits_str(bytes: &[u8], start_bit: usize, length: usize) -> Vec<u8> {
@@ -701,7 +700,7 @@ fn render_svg(
     let total_bits: usize = header_spans.iter().chain(data_spans.iter())
         .map(|s| s.length).sum();
     let bits_per_row = BITSTREAM_MAX_WIDTH / BITSTREAM_BIT_SIZE;
-    let bitstream_rows = (total_bits + bits_per_row - 1) / bits_per_row;
+    let bitstream_rows = total_bits.div_ceil(bits_per_row);
     let bitstream_height = bitstream_rows * BITSTREAM_BIT_SIZE + BITSTREAM_Y_OFFSET + MARGIN;
 
     let main_content_height = content_height.max(legend_height + MARGIN * 2 + stats_height);
@@ -914,9 +913,9 @@ fn render_svg(
             } else {
                 let delta = gt.original_ts as i64 - gt.decoded_ts as i64;
                 let delta_str = if delta > 0 {
-                    format!("+{}s", delta)
+                    format!("+{delta}s")
                 } else {
-                    format!("{}s", delta)
+                    format!("{delta}s")
                 };
                 format!("{} ({})", format_timestamp(gt.original_ts), delta_str)
             };
@@ -985,9 +984,8 @@ fn render_legend(legend_x: usize) -> String {
 
     // Header section
     legend.push_str(&format!(
-        r#"  <text x="{}" y="{}" class="legend-item" font-weight="bold">Header (10 bytes)</text>
-"#,
-        x, y
+        r#"  <text x="{x}" y="{y}" class="legend-item" font-weight="bold">Header (10 bytes)</text>
+"#
     ));
     y += 16;
 
@@ -1012,9 +1010,8 @@ fn render_legend(legend_x: usize) -> String {
 
     // Data encodings section
     legend.push_str(&format!(
-        r#"  <text x="{}" y="{}" class="legend-item" font-weight="bold">Bit-Packed Data</text>
-"#,
-        x, y
+        r#"  <text x="{x}" y="{y}" class="legend-item" font-weight="bold">Bit-Packed Data</text>
+"#
     ));
     y += 18;
 
@@ -1049,9 +1046,8 @@ fn render_legend(legend_x: usize) -> String {
 
     // Notes section
     legend.push_str(&format!(
-        r#"  <text x="{}" y="{}" class="legend-item" font-weight="bold">Notes</text>
-"#,
-        x, y
+        r#"  <text x="{x}" y="{y}" class="legend-item" font-weight="bold">Notes</text>
+"#
     ));
     y += 16;
 
@@ -1063,9 +1059,8 @@ fn render_legend(legend_x: usize) -> String {
 
     for note in notes {
         legend.push_str(&format!(
-            r#"  <text x="{}" y="{}" class="legend-item">{}</text>
-"#,
-            x, y, note
+            r#"  <text x="{x}" y="{y}" class="legend-item">{note}</text>
+"#
         ));
         y += 14;
     }
@@ -1185,24 +1180,24 @@ fn render_bitstream(
             }
             SpanKind::Zero => {
                 idx += 1;
-                current_ts = base_ts + idx * interval as u64;
+                current_ts = base_ts + idx * u64::from(interval);
             }
             SpanKind::ZeroRun8_21(n) | SpanKind::ZeroRun22_149(n) => {
-                idx += *n as u64;
-                current_ts = base_ts + idx * interval as u64;
+                idx += u64::from(*n);
+                current_ts = base_ts + idx * u64::from(interval);
             }
             SpanKind::Delta1(d) | SpanKind::Delta2(d) | SpanKind::Delta3_10(d) | SpanKind::LargeDelta(d) => {
                 current_value += d;
                 idx += 1;
-                current_ts = base_ts + idx * interval as u64;
+                current_ts = base_ts + idx * u64::from(interval);
             }
             SpanKind::SingleGap => {
                 idx += 1;
-                current_ts = base_ts + idx * interval as u64;
+                current_ts = base_ts + idx * u64::from(interval);
             }
             SpanKind::Gap(n) => {
-                idx += *n as u64;
-                current_ts = base_ts + idx * interval as u64;
+                idx += u64::from(*n);
+                current_ts = base_ts + idx * u64::from(interval);
             }
         }
     }
@@ -1214,9 +1209,9 @@ fn render_bitstream(
 }
 
 /// Read a CSV file with ts,temperature columns and encode it
-/// Returns (encoded_bytes, original_readings)
+/// Returns (`encoded_bytes`, `original_readings`)
 fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open CSV: {}", e))?;
+    let file = File::open(path).map_err(|e| format!("Failed to open CSV: {e}"))?;
     let reader = BufReader::new(file);
 
     let mut encoder: Encoder<i8> = Encoder::new(DEFAULT_INTERVAL);
@@ -1225,7 +1220,7 @@ fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), Str
 
     for line in reader.lines() {
         line_num += 1;
-        let line = line.map_err(|e| format!("Read error at line {}: {}", line_num, e))?;
+        let line = line.map_err(|e| format!("Read error at line {line_num}: {e}"))?;
         let trimmed = line.trim();
 
         // Skip empty lines and header
@@ -1261,7 +1256,7 @@ fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), Str
 
         encoder
             .append(ts, temp)
-            .map_err(|e| format!("Encode error at line {}: {:?}", line_num, e))?;
+            .map_err(|e| format!("Encode error at line {line_num}: {e:?}"))?;
     }
 
     if original_readings.is_empty() {
@@ -1279,14 +1274,13 @@ fn main() {
     let is_csv = args
         .input
         .extension()
-        .map(|ext| ext.eq_ignore_ascii_case("csv"))
-        .unwrap_or(false);
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"));
 
     let (bytes, csv_readings) = if is_csv {
         match read_csv_and_encode(&args.input) {
             Ok((b, readings)) => (b, Some(readings)),
             Err(e) => {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
@@ -1365,8 +1359,7 @@ fn main() {
             println!("Ground truth: All values and timestamps match ✓");
         } else {
             println!(
-                "Ground truth: {} value mismatches, {} timestamp mismatches",
-                mismatches, ts_mismatches
+                "Ground truth: {mismatches} value mismatches, {ts_mismatches} timestamp mismatches"
             );
         }
     }

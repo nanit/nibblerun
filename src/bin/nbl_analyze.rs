@@ -51,7 +51,7 @@ struct Stats {
 }
 
 impl Stats {
-    fn merge(&mut self, other: &Stats) {
+    fn merge(&mut self, other: &Self) {
         self.files_processed += other.files_processed;
         self.total_readings += other.total_readings;
 
@@ -110,7 +110,7 @@ impl Stats {
 
         for (delta, count) in &self.delta_counts {
             let abs_delta = delta.abs();
-            if abs_delta >= 3 && abs_delta <= 10 {
+            if (3..=10).contains(&abs_delta) {
                 tier_3_10 += count;
             } else if abs_delta >= 11 {
                 tier_11_plus += count;
@@ -176,7 +176,7 @@ impl Stats {
         let total_zeros_in_runs: u64 = self
             .zero_run_lengths
             .iter()
-            .map(|(len, count)| *len as u64 * count)
+            .map(|(len, count)| u64::from(*len) * count)
             .sum();
 
         println!("Total zero-runs: {}", format_num(total_runs));
@@ -279,7 +279,7 @@ impl Stats {
                 let bits = match **gap_size {
                     1 => 3,
                     2..=65 => 14,
-                    n => 14 * ((n as u64 + 63) / 64), // multiple 14-bit chunks
+                    n => 14 * u64::from(n).div_ceil(64), // multiple 14-bit chunks
                 };
                 println!(
                     "  {:>3} intervals: {:>10} ({:>6.3}%) - {} bits each",
@@ -301,10 +301,10 @@ impl Stats {
         let mut zero_run_bits: u64 = 0;
         for (len, count) in &self.zero_run_lengths {
             let bits_per_run = match *len {
-                1..=7 => *len as u64, // individual bits
+                1..=7 => u64::from(*len), // individual bits
                 8..=21 => 9,          // 11110 + 4 bits
                 22..=149 => 13,       // 111110 + 7 bits
-                _ => 13 * ((*len as u64 + 127) / 128), // multiple 13-bit chunks
+                _ => 13 * u64::from(*len).div_ceil(128), // multiple 13-bit chunks
             };
             zero_run_bits += bits_per_run * count;
         }
@@ -322,7 +322,7 @@ impl Stats {
                 }
                 n => {
                     multi_gaps_count += count;
-                    multi_gaps_bits += count * 14 * ((n as u64 + 63) / 64);
+                    multi_gaps_bits += count * 14 * u64::from(n).div_ceil(64);
                 }
             }
         }
@@ -369,7 +369,7 @@ impl Stats {
         println!(
             "  TOTAL:       {:>12} bits ({} bytes)",
             format_num(total_bits),
-            format_num((total_bits + 7) / 8)
+            format_num(total_bits.div_ceil(8))
         );
 
         // Alternative schemes (compared to NEW encoding)
@@ -488,8 +488,8 @@ impl Stats {
         println!();
         println!(
             "  Compressed size: {} bytes ({:.1}x compression vs 12 bytes/reading)",
-            format_num((total_bits + 7) / 8),
-            (self.total_readings * 12) as f64 / ((total_bits + 7) / 8) as f64
+            format_num(total_bits.div_ceil(8)),
+            (self.total_readings * 12) as f64 / total_bits.div_ceil(8) as f64
         );
 
         // Recommendations
@@ -505,20 +505,16 @@ impl Stats {
         let single_gap_pct = if total_gaps > 0 { 100.0 * single_gaps_count as f64 / total_gaps as f64 } else { 0.0 };
 
         println!(
-            "• Zero deltas dominate ({:.2}%). RLE scheme is effective.",
-            zero_pct
+            "• Zero deltas dominate ({zero_pct:.2}%). RLE scheme is effective."
         );
         println!(
-            "• ±1 deltas are common ({:.2}%). 3-bit encoding is appropriate.",
-            pm1_pct
+            "• ±1 deltas are common ({pm1_pct:.2}%). 3-bit encoding is appropriate."
         );
         println!(
-            "• ±2 deltas are rare ({:.2}%). 5-bit encoding keeps prefix tree balanced.",
-            pm2_pct
+            "• ±2 deltas are rare ({pm2_pct:.2}%). 5-bit encoding keeps prefix tree balanced."
         );
         println!(
-            "• Gaps ({:.2}%): {:.1}% are single-interval (3 bits), rest use 14 bits.",
-            gap_pct, single_gap_pct
+            "• Gaps ({gap_pct:.2}%): {single_gap_pct:.1}% are single-interval (3 bits), rest use 14 bits."
         );
         if single_gap_pct > 90.0 && total_gaps > 0 {
             println!(
@@ -605,15 +601,13 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
 
             if delta == 0 {
                 current_zero_run += 1;
-            } else {
-                if current_zero_run > 0 {
-                    *stats
-                        .zero_run_lengths
-                        .entry(current_zero_run)
-                        .or_insert(0) += 1;
-                    stats.max_zero_run = stats.max_zero_run.max(current_zero_run);
-                    current_zero_run = 0;
-                }
+            } else if current_zero_run > 0 {
+                *stats
+                    .zero_run_lengths
+                    .entry(current_zero_run)
+                    .or_insert(0) += 1;
+                stats.max_zero_run = stats.max_zero_run.max(current_zero_run);
+                current_zero_run = 0;
             }
         }
 
@@ -654,12 +648,11 @@ fn main() {
     // Collect all CSV files
     let entries: Vec<_> = fs::read_dir(&args.dir)
         .expect("Failed to read directory")
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| {
             e.path()
                 .extension()
-                .map(|ext| ext == "csv")
-                .unwrap_or(false)
+                .is_some_and(|ext| ext == "csv")
         })
         .collect();
 
@@ -692,19 +685,18 @@ fn main() {
         }
 
         let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
-        if args.progress > 0 && count % args.progress as u64 == 0 {
+        if args.progress > 0 && count.is_multiple_of(args.progress as u64) {
             let elapsed = start.elapsed().as_secs_f64();
             let rate = count as f64 / elapsed;
             let eta = (total_files as u64 - count) as f64 / rate;
             eprint!(
-                "\rProcessed {}/{} files ({:.0}/s, ETA: {:.0}s)  ",
-                count, total_files, rate, eta
+                "\rProcessed {count}/{total_files} files ({rate:.0}/s, ETA: {eta:.0}s)  "
             );
         }
 
         // Also update on every file for first 100
         if i < 100 && i % 10 == 0 {
-            eprint!("\rProcessed {}/{} files  ", i, total_files);
+            eprint!("\rProcessed {i}/{total_files} files  ");
         }
     }
 

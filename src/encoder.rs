@@ -42,7 +42,7 @@ impl<V: Value> Encoder<V> {
     #[inline]
     #[must_use]
     pub fn new(interval: u16) -> Self {
-        Encoder {
+        Self {
             base_ts: 0,
             last_ts: 0,
             bit_accum: 0,
@@ -61,7 +61,7 @@ impl<V: Value> Encoder<V> {
     /// Get the interval in seconds
     #[inline]
     #[must_use]
-    pub fn interval(&self) -> u16 {
+    pub const fn interval(&self) -> u16 {
         self.interval
     }
 
@@ -195,7 +195,6 @@ impl<V: Value> Encoder<V> {
         // For the first interval, update first_temp to the average
         if self.count == 1 {
             self.first_temp = avg;
-            self.prev_temp = avg;
         } else {
             // Encode delta from previous interval's average
             let delta = avg - self.prev_temp;
@@ -205,8 +204,8 @@ impl<V: Value> Encoder<V> {
                 self.flush_zeros();
                 self.encode_delta(delta);
             }
-            self.prev_temp = avg;
         }
+        self.prev_temp = avg;
 
         // Clear pending state (re-extract bits after any encoding that may have occurred)
         let (bits, _, _) = unpack_pending(self.pending_state);
@@ -297,7 +296,7 @@ impl<V: Value> Encoder<V> {
     /// - n 22-149: 13-bit run encoding (prefix 111110 + 7-bit length)
     /// - n 150+: multiple 13-bit encodings
     #[inline]
-    fn zero_run_bits(mut n: u32) -> u32 {
+    const fn zero_run_bits(mut n: u32) -> u32 {
         let mut bits = 0;
         while n > 0 {
             if n <= 7 {
@@ -321,7 +320,7 @@ impl<V: Value> Encoder<V> {
     /// Get the number of readings encoded
     #[inline]
     #[must_use]
-    pub fn count(&self) -> usize {
+    pub const fn count(&self) -> usize {
         self.count as usize
     }
 
@@ -738,7 +737,7 @@ impl<'a> BitReader<'a> {
     }
 
     #[inline]
-    fn has_more(&self) -> bool {
+    const fn has_more(&self) -> bool {
         self.left > 0 || self.pos < self.buf.len()
     }
 }

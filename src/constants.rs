@@ -1,7 +1,7 @@
 //! Internal constants and helper functions for nibblerun encoding.
 
 /// Base epoch for timestamp compression (reduces storage by ~4 bytes)
-pub(crate) const EPOCH_BASE: u64 = 1_760_000_000;
+pub const EPOCH_BASE: u64 = 1_760_000_000;
 
 // Precomputed delta encoding table: (bits, num_bits) for deltas -10 to +10
 //
@@ -16,7 +16,7 @@ pub(crate) const EPOCH_BASE: u64 = 1_760_000_000;
 // - 11111110xxxxxxxxxxx = large delta (19 bits)
 // - 11111111xxxxxx = gap 2-65 intervals (14 bits)
 #[allow(clippy::unusual_byte_groupings)]
-pub(crate) const DELTA_ENCODE: [(u32, u8); 21] = [
+pub const DELTA_ENCODE: [(u32, u8); 21] = [
     (0b1111110_0000, 11), // -10
     (0b1111110_0001, 11), // -9
     (0b1111110_0010, 11), // -8
@@ -43,18 +43,18 @@ pub(crate) const DELTA_ENCODE: [(u32, u8); 21] = [
 // Branch hints using #[cold] attribute (stable Rust)
 #[cold]
 #[inline(never)]
-pub(crate) fn cold_gap_handler() {}
+pub const fn cold_gap_handler() {}
 
 /// Division by interval
 #[inline]
-pub(crate) fn div_by_interval(x: u64, interval: u16) -> u64 {
+pub fn div_by_interval(x: u64, interval: u16) -> u64 {
     x / u64::from(interval)
 }
 
 /// Compute average with proper rounding (round half away from zero)
 /// This ensures the average is always within [min, max] of the input values
 #[inline]
-pub(crate) fn rounded_avg(sum: i32, count: u16) -> i32 {
+pub fn rounded_avg(sum: i32, count: u16) -> i32 {
     if count <= 1 {
         return sum;
     }
@@ -71,14 +71,14 @@ pub(crate) fn rounded_avg(sum: i32, count: u16) -> i32 {
 /// - Bits 6-15: `pending_count` (0-1023)
 /// - Bits 16-47: `pending_sum` as i32 (32 bits, stored as u32)
 #[inline]
-pub(crate) fn pack_pending(bits: u32, count: u16, sum: i32) -> u64 {
+pub fn pack_pending(bits: u32, count: u16, sum: i32) -> u64 {
     (u64::from(sum as u32) << 16) | ((u64::from(count) & 0x3FF) << 6) | (u64::from(bits) & 0x3F)
 }
 
 /// Unpack pending averaging state from `pending_state`
 /// Returns (`bit_accum_count`, `pending_count`, `pending_sum`)
 #[inline]
-pub(crate) fn unpack_pending(packed: u64) -> (u32, u16, i32) {
+pub const fn unpack_pending(packed: u64) -> (u32, u16, i32) {
     let bits = (packed & 0x3F) as u32;
     let count = ((packed >> 6) & 0x3FF) as u16;
     let sum = (packed >> 16) as u32 as i32;
@@ -104,7 +104,7 @@ pub(crate) fn unpack_pending(packed: u64) -> (u32, u16, i32) {
 /// | 9-21       | 9-21 bits        | 9 bits       | run    |
 /// | 22+        | 22+ bits         | 13 bits      | run    |
 #[inline]
-pub(crate) fn encode_zero_run(n: u32) -> (u32, u32, u32) {
+pub const fn encode_zero_run(n: u32) -> (u32, u32, u32) {
     if n <= 7 {
         // Individual zeros are more efficient for small runs
         (0, 1, 1)
@@ -113,9 +113,9 @@ pub(crate) fn encode_zero_run(n: u32) -> (u32, u32, u32) {
         ((0b11110 << 4) | (n - 8), 9, n)
     } else if n <= 149 {
         // 22-149 zeros: use the 13-bit encoding (prefix 111110 + 7-bit length)
-        ((0b111110 << 7) | (n - 22), 13, n)
+        ((0b11_1110 << 7) | (n - 22), 13, n)
     } else {
         // 150+ zeros: encode 149 at a time
-        ((0b111110 << 7) | 127, 13, 149)
+        ((0b11_1110 << 7) | 127, 13, 149)
     }
 }
