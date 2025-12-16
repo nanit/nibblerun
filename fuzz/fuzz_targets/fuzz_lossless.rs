@@ -11,7 +11,7 @@ fuzz_target!(|data: &[u8]| {
 
     // First 2 bytes determine interval (1-65535)
     let interval = u16::from_le_bytes([data[0], data[1]]).max(1);
-    let mut enc = Encoder::with_interval(interval);
+    let mut enc: Encoder<i32> = Encoder::new(interval);
     let base_ts = 1_760_000_000u64;
 
     // Track input (interval_idx, temp) pairs

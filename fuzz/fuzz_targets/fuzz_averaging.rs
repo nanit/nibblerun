@@ -12,7 +12,7 @@ fuzz_target!(|data: &[u8]| {
 
     // First 2 bytes determine interval (use larger interval so multiple readings fit)
     let interval = (u16::from_le_bytes([data[0], data[1]]).max(100) as u64).max(100);
-    let mut enc = Encoder::with_interval(interval as u16);
+    let mut enc: Encoder<i32> = Encoder::new(interval as u16);
     let base_ts = 1_760_000_000u64;
 
     // Track readings per interval for expected average calculation

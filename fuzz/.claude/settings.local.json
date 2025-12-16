@@ -20,7 +20,12 @@
       "Bash(./target/release/nbl-gen:*)",
       "Bash(cargo build:*)",
       "Bash(wc:*)",
-      "Bash(./target/release/nbl-analyze:*)"
+      "Bash(./target/release/nbl-analyze:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(sort:*)",
+      "Bash(find:*)",
+      "Bash(cargo clippy:*)"
     ],
     "deny": [],
     "ask": []

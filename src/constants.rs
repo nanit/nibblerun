@@ -3,9 +3,6 @@
 /// Base epoch for timestamp compression (reduces storage by ~4 bytes)
 pub(crate) const EPOCH_BASE: u64 = 1_760_000_000;
 
-/// Header size in bytes (4 + 2 + 4 = 10)
-pub(crate) const HEADER_SIZE: usize = 10;
-
 // Precomputed delta encoding table: (bits, num_bits) for deltas -10 to +10
 //
 // New encoding scheme (optimized based on real-world data analysis):

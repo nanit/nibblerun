@@ -10,11 +10,11 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 struct CsvReading {
     ts: u64,
-    value: i32,
+    value: i8,
 }
 
 const EPOCH_BASE: u64 = 1_760_000_000;
-const HEADER_SIZE: usize = 10;
+const HEADER_SIZE: usize = 7; // 4 (base_ts_offset) + 2 (count) + 1 (first_value as i8)
 const DEFAULT_INTERVAL: u16 = 300;
 
 // Layout constants
@@ -67,7 +67,7 @@ mod colors {
 enum SpanKind {
     HeaderBaseTs(u64),
     HeaderCount(u16),
-    HeaderFirstValue(i32),
+    HeaderFirstValue(i8),
     Zero,
     ZeroRun8_21(u32),
     ZeroRun22_149(u32),
@@ -196,9 +196,9 @@ struct Row {
 #[derive(Debug)]
 struct GroundTruth {
     original_ts: u64,
-    original_value: i32,
+    original_value: i8,
     decoded_ts: u64,
-    decoded_value: i32,
+    decoded_value: i8,
     ts_matches: bool,
     value_matches: bool,
 }
@@ -236,14 +236,14 @@ impl<'a> BitReader<'a> {
     }
 }
 
-fn parse_header(bytes: &[u8]) -> (Vec<BitSpan>, u64, u16, i32) {
+fn parse_header(bytes: &[u8]) -> (Vec<BitSpan>, u64, u16, i8) {
     let mut spans = Vec::new();
     let mut id = 0;
 
-    // Header layout (10 bytes / 80 bits):
+    // Header layout (7 bytes / 56 bits):
     // [0-3]: base_ts_offset (32 bits)
     // [4-5]: count (16 bits)
-    // [6-9]: first_value (32 bits)
+    // [6]: first_value (8 bits, i8)
 
     // base_ts_offset: 4 bytes = 32 bits
     let base_ts_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -266,12 +266,12 @@ fn parse_header(bytes: &[u8]) -> (Vec<BitSpan>, u64, u16, i32) {
     });
     id += 1;
 
-    // first_value: 4 bytes = 32 bits
-    let first_value = i32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
+    // first_value: 1 byte = 8 bits (i8)
+    let first_value = bytes[6] as i8;
     spans.push(BitSpan {
         id,
         start_bit: 48,
-        length: 32,
+        length: 8,
         kind: SpanKind::HeaderFirstValue(first_value),
     });
 
@@ -449,7 +449,7 @@ fn build_rows(
     header_spans: &[BitSpan],
     data_spans: &[BitSpan],
     base_ts: u64,
-    first_value: i32,
+    first_value: i8,
     interval: u16,
     csv_readings: Option<&[CsvReading]>,
 ) -> Vec<Row> {
@@ -475,14 +475,15 @@ fn build_rows(
             value_matches: r.value == first_value,
         })
     });
+    let first_value_i32 = i32::from(first_value);
     rows.push(Row {
         kind: RowKind::Event { span_id: None, show_bits: false },
-        left_text: format_event(0, base_ts, first_value, "(header)"),
+        left_text: format_event(0, base_ts, first_value_i32, "(header)"),
         ground_truth: first_gt,
     });
 
-    // Data rows
-    let mut value = first_value;
+    // Data rows - use i32 internally for delta arithmetic, cast to i8 for comparisons
+    let mut value = first_value_i32;
     let mut idx: u64 = 1;
     let mut event_num = 1;
     let mut csv_idx = 1usize; // Start at 1, since 0 was used for header
@@ -491,14 +492,15 @@ fn build_rows(
         match &span.kind {
             SpanKind::Zero => {
                 let ts = base_ts + idx * interval as u64;
+                let value_i8 = value as i8;
                 let gt = csv_readings.and_then(|readings| {
                     readings.get(csv_idx).map(|r| GroundTruth {
                         original_ts: r.ts,
                         original_value: r.value,
                         decoded_ts: ts,
-                        decoded_value: value,
+                        decoded_value: value_i8,
                         ts_matches: r.ts == ts,
-                        value_matches: r.value == value,
+                        value_matches: r.value == value_i8,
                     })
                 });
                 rows.push(Row {
@@ -511,6 +513,7 @@ fn build_rows(
                 csv_idx += 1;
             }
             SpanKind::ZeroRun8_21(n) | SpanKind::ZeroRun22_149(n) => {
+                let value_i8 = value as i8;
                 for i in 0..*n {
                     let ts = base_ts + idx * interval as u64;
                     let show_bits = i == 0;
@@ -519,9 +522,9 @@ fn build_rows(
                             original_ts: r.ts,
                             original_value: r.value,
                             decoded_ts: ts,
-                            decoded_value: value,
+                            decoded_value: value_i8,
                             ts_matches: r.ts == ts,
-                            value_matches: r.value == value,
+                            value_matches: r.value == value_i8,
                         })
                     });
                     rows.push(Row {
@@ -537,14 +540,15 @@ fn build_rows(
             SpanKind::Delta1(d) | SpanKind::Delta2(d) | SpanKind::Delta3_10(d) | SpanKind::LargeDelta(d) => {
                 value += d;
                 let ts = base_ts + idx * interval as u64;
+                let value_i8 = value as i8;
                 let gt = csv_readings.and_then(|readings| {
                     readings.get(csv_idx).map(|r| GroundTruth {
                         original_ts: r.ts,
                         original_value: r.value,
                         decoded_ts: ts,
-                        decoded_value: value,
+                        decoded_value: value_i8,
                         ts_matches: r.ts == ts,
-                        value_matches: r.value == value,
+                        value_matches: r.value == value_i8,
                     })
                 });
                 rows.push(Row {
@@ -685,7 +689,7 @@ fn render_svg(
     has_ground_truth: bool,
     compression_stats: Option<&CompressionStats>,
     base_ts: u64,
-    first_value: i32,
+    first_value: i8,
     interval: u16,
 ) -> String {
     let num_rows = rows.len();
@@ -990,7 +994,7 @@ fn render_legend(legend_x: usize) -> String {
     let header_fields = [
         ("base_ts_offset", "4 bytes", colors::HEADER),
         ("count", "2 bytes", colors::HEADER),
-        ("first_value", "4 bytes", colors::HEADER),
+        ("first_value", "1 byte", colors::HEADER),
     ];
 
     for (name, size, color) in header_fields {
@@ -1075,7 +1079,7 @@ fn render_bitstream(
     data_spans: &[BitSpan],
     bytes: &[u8],
     base_ts: u64,
-    first_value: i32,
+    first_value: i8,
     interval: u16,
     y_start: usize,
 ) -> (String, usize) {
@@ -1108,7 +1112,7 @@ fn render_bitstream(
     let mut x = MARGIN;
     let mut y = y_start + BITSTREAM_Y_OFFSET;
     let mut current_ts = base_ts;
-    let mut current_value = first_value;
+    let mut current_value = i32::from(first_value);
     let mut idx: u64 = 0;
 
     // Combine header and data spans
@@ -1215,7 +1219,7 @@ fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), Str
     let file = File::open(path).map_err(|e| format!("Failed to open CSV: {}", e))?;
     let reader = BufReader::new(file);
 
-    let mut encoder = Encoder::new(DEFAULT_INTERVAL);
+    let mut encoder: Encoder<i8> = Encoder::new(DEFAULT_INTERVAL);
     let mut original_readings = Vec::new();
     let mut line_num = 0;
 
@@ -1239,15 +1243,18 @@ fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), Str
             .parse()
             .map_err(|_| format!("Invalid timestamp at line {}: '{}'", line_num, parts[0]))?;
 
-        let temp: i32 = parts[1]
+        let temp_i32: i32 = parts[1]
             .trim()
             .parse()
             .map_err(|_| format!("Invalid temperature at line {}: '{}'", line_num, parts[1]))?;
 
         // Skip sentinel values (gaps in original data)
-        if temp == -1000 {
+        if temp_i32 == -1000 {
             continue;
         }
+
+        // Convert to i8 for encoding (values must be in i8 range: -128 to 127)
+        let temp = temp_i32 as i8;
 
         // Store original reading for ground truth comparison
         original_readings.push(CsvReading { ts, value: temp });

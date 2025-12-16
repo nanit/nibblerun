@@ -11,7 +11,7 @@ fuzz_target!(|data: &[u8]| {
 
     // First 2 bytes determine interval (1-65535)
     let interval = u16::from_le_bytes([data[0], data[1]]).max(1);
-    let mut enc = Encoder::with_interval(interval);
+    let mut enc: Encoder<i32> = Encoder::new(interval);
     let mut ts = 1_760_000_000u64;
 
     // Remaining bytes are interpreted as (ts_delta: u16, temp: i8) tuples
@@ -31,7 +31,7 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(enc.size(), bytes.len(), "size mismatch");
 
     // Property 2: count() == decode().len()
-    let decoded = decode(&bytes);
+    let decoded = decode::<i32>(&bytes, u64::from(interval));
     assert_eq!(enc.count(), decoded.len(), "count mismatch");
 
     // Property 3: direct decode equals decode via bytes

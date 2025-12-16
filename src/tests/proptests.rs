@@ -30,7 +30,7 @@ proptest! {
     /// Property: size() must always equal to_bytes().len()
     #[test]
     fn prop_size_accuracy((readings, interval) in arb_readings()) {
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
         for (ts, temp) in readings {
             enc.append(ts, temp).unwrap();
         }
@@ -40,7 +40,7 @@ proptest! {
     /// Property: decoded length must equal count()
     #[test]
     fn prop_count_consistency((readings, interval) in arb_readings()) {
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
         for (ts, temp) in readings {
             enc.append(ts, temp).unwrap();
         }
@@ -51,13 +51,13 @@ proptest! {
     /// Property: encode then decode via bytes equals direct decode
     #[test]
     fn prop_roundtrip_via_bytes((readings, interval) in arb_readings()) {
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
         for (ts, temp) in readings {
             enc.append(ts, temp).unwrap();
         }
 
         let direct = enc.decode();
-        let via_bytes = decode(&enc.to_bytes(), u64::from(interval));
+        let via_bytes = decode::<i32>(&enc.to_bytes(), u64::from(interval));
 
         prop_assert_eq!(direct.len(), via_bytes.len());
         for (d, b) in direct.iter().zip(via_bytes.iter()) {
@@ -69,7 +69,7 @@ proptest! {
     /// Property: decoded timestamps are strictly monotonic
     #[test]
     fn prop_monotonic_timestamps((readings, interval) in arb_readings()) {
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
         for (ts, temp) in readings {
             enc.append(ts, temp).unwrap();
         }
@@ -84,7 +84,7 @@ proptest! {
     /// Property: to_bytes() is idempotent (multiple calls return same result)
     #[test]
     fn prop_idempotent_serialization((readings, interval) in arb_readings()) {
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
         for (ts, temp) in readings {
             enc.append(ts, temp).unwrap();
         }
@@ -97,7 +97,7 @@ proptest! {
     /// Property: all decoded timestamps are multiples of interval from base
     #[test]
     fn prop_timestamp_alignment((readings, interval) in arb_readings()) {
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
         for (ts, temp) in readings {
             enc.append(ts, temp).unwrap();
         }
@@ -124,7 +124,7 @@ proptest! {
             return Ok(());
         }
 
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
         for &(ts, temp) in &readings {
             enc.append(ts, temp).unwrap();
         }
@@ -177,7 +177,7 @@ proptest! {
         interval in prop::sample::select(vec![60u16, 300, 600, 3600]),
         temps in prop::collection::vec(-100i32..140, 1..100),
     ) {
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
 
         // One reading per interval, no jitter
         for (i, &temp) in temps.iter().enumerate() {
@@ -207,7 +207,7 @@ proptest! {
             1..20
         ),
     ) {
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
 
         // For each interval, add all its readings within the interval window
         for (interval_idx, temps) in interval_temps.iter().enumerate() {
@@ -248,7 +248,7 @@ proptest! {
         // Generate readings with random jitter within each interval
         readings_per_interval in prop::collection::vec(1u8..5, 1..50),
     ) {
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
         let mut expected_intervals = Vec::new();
 
         for (interval_idx, &count) in readings_per_interval.iter().enumerate() {
@@ -280,7 +280,7 @@ proptest! {
         // Generate a list of interval indices (sorted, unique) to have readings
         interval_indices in prop::collection::btree_set(0u64..100, 1..30),
     ) {
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
         let indices: Vec<u64> = interval_indices.into_iter().collect();
 
         // Add one reading per selected interval
@@ -331,7 +331,7 @@ proptest! {
         let mut sorted_timestamps = timestamps.clone();
         sorted_timestamps.sort();
 
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
 
         // Add readings at each timestamp
         for &ts_offset in &sorted_timestamps {
@@ -373,7 +373,7 @@ proptest! {
             return Ok(());
         }
 
-        let mut enc = Encoder::new(interval);
+        let mut enc = Encoder::<i32>::new(interval);
         let mut expected: Vec<(u64, i32)> = Vec::new();
 
         // Add one reading per selected interval with varying temps

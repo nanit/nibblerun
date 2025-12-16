@@ -96,7 +96,7 @@ fn read_csv(path: &PathBuf) -> Result<Vec<(u64, i32)>, String> {
 fn main() {
     let args = Args::parse();
 
-    let mut enc = Encoder::new(args.interval);
+    let mut enc: Encoder<i32> = Encoder::new(args.interval);
 
     // Check if CSV input is provided
     if let Some(csv_path) = &args.csv {

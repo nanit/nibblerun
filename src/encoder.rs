@@ -1,21 +1,23 @@
 //! Encoder for nibblerun time series compression.
 
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 
 use crate::constants::{
     cold_gap_handler, div_by_interval, encode_zero_run, pack_pending, rounded_avg, unpack_pending,
-    DELTA_ENCODE, EPOCH_BASE, HEADER_SIZE,
+    DELTA_ENCODE, EPOCH_BASE,
 };
 use crate::error::AppendError;
 use crate::reading::Reading;
+use crate::value::Value;
 
 /// Encoder for `NibbleRun` format
 ///
 /// Accumulates sensor readings and produces compressed output.
-/// Optimized for cache efficiency with compact struct layout.
+/// Generic over value type V (i8, i16, or i32) for compile-time type safety.
 #[repr(C)]
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Encoder {
+pub struct Encoder<V: Value> {
     base_ts: u64,
     last_ts: u64,
     bit_accum: u64,
@@ -28,9 +30,11 @@ pub struct Encoder {
     prev_logical_idx: u32,
     count: u16,
     interval: u16,
+    #[serde(skip)]
+    _marker: PhantomData<V>,
 }
 
-impl Encoder {
+impl<V: Value> Encoder<V> {
     /// Create a new encoder with the specified interval
     ///
     /// # Arguments
@@ -50,6 +54,7 @@ impl Encoder {
             prev_logical_idx: 0,
             count: 0,
             interval,
+            _marker: PhantomData,
         }
     }
 
@@ -60,13 +65,21 @@ impl Encoder {
         self.interval
     }
 
+    /// Header size for this encoder's value type
+    #[inline]
+    #[must_use]
+    pub const fn header_size() -> usize {
+        4 + 2 + V::BYTES // base_ts_offset (4) + count (2) + first_value (V::BYTES)
+    }
+
     /// Append a sensor reading
     ///
     /// Multiple readings in the same interval are averaged.
+    /// The value type V provides compile-time range checking.
     ///
     /// # Arguments
     /// * `ts` - Unix timestamp in seconds
-    /// * `value` - Sensor value
+    /// * `value` - Sensor value (type checked at compile time)
     ///
     /// # Errors
     /// Returns an error if:
@@ -76,7 +89,9 @@ impl Encoder {
     /// - Too many total readings (max 65535)
     /// - Value delta exceeds encodable range [-1024, 1023]
     #[inline]
-    pub fn append(&mut self, ts: u64, value: i32) -> Result<(), AppendError> {
+    pub fn append(&mut self, ts: u64, value: V) -> Result<(), AppendError> {
+        let value = value.to_i32();
+
         // First reading - initialize pending state
         if self.count == 0 {
             self.base_ts = ts;
@@ -226,12 +241,14 @@ impl Encoder {
             return 0;
         }
 
+        let header_size = Self::header_size();
+
         // Extract pending state
         let (actual_bits, pending_count, pending_sum) = unpack_pending(self.pending_state);
 
         // For single interval, no additional bits needed
         if self.count == 1 {
-            return HEADER_SIZE;
+            return header_size;
         }
 
         // Calculate the final interval's delta and its encoding size
@@ -256,7 +273,7 @@ impl Encoder {
 
         let total_bits = actual_bits + zero_run_bits + extra_bits;
 
-        HEADER_SIZE + self.data.len() + (total_bits as usize).div_ceil(8)
+        header_size + self.data.len() + (total_bits as usize).div_ceil(8)
     }
 
     /// Calculate the number of bits needed to encode a delta
@@ -311,7 +328,7 @@ impl Encoder {
     /// Decode the encoder's contents back to readings
     #[must_use]
     #[allow(clippy::too_many_lines)]
-    pub fn decode(&self) -> Vec<Reading> {
+    pub fn decode(&self) -> Vec<Reading<V>> {
         if self.count == 0 {
             return Vec::new();
         }
@@ -336,7 +353,7 @@ impl Encoder {
         let mut decoded = Vec::with_capacity(self.count as usize);
         decoded.push(Reading {
             ts: self.base_ts,
-            value: first_temp,
+            value: V::from_i32(first_temp),
         });
 
         if self.count == 1 {
@@ -416,7 +433,7 @@ impl Encoder {
                 // 0 = zero delta
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
-                    value: prev_temp,
+                    value: V::from_i32(prev_temp),
                 });
                 idx += 1;
                 continue;
@@ -426,7 +443,7 @@ impl Encoder {
                 prev_temp += if reader.read_bits(1) == 0 { 1 } else { -1 };
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
-                    value: prev_temp,
+                    value: V::from_i32(prev_temp),
                 });
                 idx += 1;
                 continue;
@@ -443,7 +460,7 @@ impl Encoder {
                 prev_temp += if reader.read_bits(1) == 0 { 2 } else { -2 };
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
-                    value: prev_temp,
+                    value: V::from_i32(prev_temp),
                 });
                 idx += 1;
                 continue;
@@ -457,7 +474,7 @@ impl Encoder {
                     }
                     decoded.push(Reading {
                         ts: self.base_ts + idx * interval,
-                        value: prev_temp,
+                        value: V::from_i32(prev_temp),
                     });
                     idx += 1;
                 }
@@ -472,7 +489,7 @@ impl Encoder {
                     }
                     decoded.push(Reading {
                         ts: self.base_ts + idx * interval,
-                        value: prev_temp,
+                        value: V::from_i32(prev_temp),
                     });
                     idx += 1;
                 }
@@ -485,7 +502,7 @@ impl Encoder {
                 prev_temp += if e < 8 { e - 10 } else { e - 5 };
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
-                    value: prev_temp,
+                    value: V::from_i32(prev_temp),
                 });
                 idx += 1;
                 continue;
@@ -501,7 +518,7 @@ impl Encoder {
                 };
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
-                    value: prev_temp,
+                    value: V::from_i32(prev_temp),
                 });
                 idx += 1;
             } else {
@@ -520,6 +537,8 @@ impl Encoder {
             return Vec::new();
         }
 
+        let header_size = Self::header_size();
+
         // Extract pending state
         let (actual_bits, pending_count, pending_sum) = unpack_pending(self.pending_state);
 
@@ -537,15 +556,20 @@ impl Encoder {
             self.first_temp
         };
 
-        let mut result = Vec::with_capacity(HEADER_SIZE + self.data.len() + 4);
+        let mut result = Vec::with_capacity(header_size + self.data.len() + 4);
 
-        // Header (10 bytes)
+        // Header: base_ts_offset (4) + count (2) + first_value (V::BYTES)
         // Use wrapping_sub for consistent behavior in debug/release modes
         // Note: timestamps before EPOCH_BASE will produce incorrect data
         let base_ts_offset = self.base_ts.wrapping_sub(EPOCH_BASE) as u32;
         result.extend_from_slice(&base_ts_offset.to_le_bytes()); // offset 0: 4 bytes
         result.extend_from_slice(&self.count.to_le_bytes()); // offset 4: 2 bytes
-        result.extend_from_slice(&first_temp.to_le_bytes()); // offset 6: 4 bytes
+
+        // Write first_value with appropriate size for V
+        let first_value = V::from_i32(first_temp);
+        let mut value_buf = [0u8; 4];
+        first_value.write_le(&mut value_buf);
+        result.extend_from_slice(&value_buf[..V::BYTES]); // offset 6: V::BYTES bytes
 
         // Data
         result.extend_from_slice(&self.data);

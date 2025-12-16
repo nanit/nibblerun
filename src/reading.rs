@@ -1,10 +1,12 @@
 //! Reading struct for decoded time series data.
 
+use crate::value::Value;
+
 /// A decoded sensor reading
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Reading {
+pub struct Reading<V: Value> {
     /// Unix timestamp in seconds
     pub ts: u64,
     /// Sensor value
-    pub value: i32,
+    pub value: V,
 }

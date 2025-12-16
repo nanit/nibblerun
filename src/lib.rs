@@ -23,7 +23,7 @@
 //! use nibblerun::{Encoder, decode};
 //!
 //! let interval = 300; // 5 minutes
-//! let mut encoder = Encoder::new(interval);
+//! let mut encoder: Encoder<i32> = Encoder::new(interval);
 //! let base_ts = 1_761_000_000_u64;
 //!
 //! // Append sensor readings (timestamp, value)
@@ -35,8 +35,8 @@
 //! let bytes = encoder.to_bytes();
 //! println!("Encoded size: {} bytes", bytes.len());
 //!
-//! // Decode back (same interval used for encoding)
-//! let readings = decode(&bytes, interval as u64);
+//! // Decode back (same interval and type used for encoding)
+//! let readings = decode::<i32>(&bytes, interval as u64);
 //! for r in &readings {
 //!     println!("ts={}, value={}", r.ts, r.value);
 //! }
@@ -44,13 +44,13 @@
 //!
 //! # Wire Format
 //!
-//! ## Header (10 bytes)
+//! ## Header (7-10 bytes depending on value type)
 //!
 //! | Offset | Size | Field | Description |
 //! |--------|------|-------|-------------|
 //! | 0 | 4 | `base_ts_offset` | First timestamp minus epoch base (1,760,000,000). Reconstructed as `epoch_base + offset`. |
 //! | 4 | 2 | `count` | Total number of readings stored. Used by decoder to know when to stop. |
-//! | 6 | 4 | `first_value` | First value as i32, stored directly (not delta-encoded). |
+//! | 6 | 1/2/4 | `first_value` | First value stored directly (not delta-encoded). Size depends on type: i8=1, i16=2, i32=4. |
 //!
 //! Note: The interval is not stored in the header - it must be provided to the decoder.
 //!
@@ -115,6 +115,7 @@ mod decoder;
 mod encoder;
 mod error;
 mod reading;
+mod value;
 
 #[cfg(test)]
 mod tests;
@@ -124,3 +125,4 @@ pub use decoder::decode;
 pub use encoder::Encoder;
 pub use error::AppendError;
 pub use reading::Reading;
+pub use value::Value;
