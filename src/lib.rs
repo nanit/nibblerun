@@ -58,16 +58,17 @@
 //!
 //! After the header, values are stored as variable-length bit-packed deltas:
 //!
-//! | Delta | Encoding | Bits | Description |
-//! |-------|----------|------|-------------|
+//! | Type | Encoding | Bits | Description |
+//! |------|----------|------|-------------|
 //! | 0 | `0` | 1 | Unchanged value (runs of 1-7 use individual zeros) |
-//! | 0 (run) | `1110xxxx` | 8 | 8-21 consecutive unchanged values |
-//! | 0 (run) | `11110xxxxxxx` | 12 | 22-149 consecutive unchanged values |
+//! | 0 (run) | `11110xxxx` | 9 | 8-21 consecutive unchanged values |
+//! | 0 (run) | `111110xxxxxxx` | 13 | 22-149 consecutive unchanged values |
 //! | ±1 | `10x` | 3 | x=0 for +1, x=1 for -1 |
-//! | ±2 | `110x` | 4 | x=0 for +2, x=1 for -2 |
-//! | ±3..±10 | `111110xxxx` | 10 | 4-bit signed offset from ±3 |
-//! | ±11..±1023 | `1111110xxxxxxxxxxx` | 18 | 11-bit signed value |
-//! | gap | `1111111xxxxxx` | 13 | Skip 1-64 intervals (no data). Larger gaps use multiple markers. |
+//! | gap (1) | `110` | 3 | Single-interval gap (no data) |
+//! | ±2 | `1110x` | 5 | x=0 for +2, x=1 for -2 |
+//! | ±3..±10 | `1111110xxxx` | 11 | 4-bit signed offset |
+//! | ±11..±1023 | `11111110xxxxxxxxxxx` | 19 | 11-bit signed value |
+//! | gap (2-65) | `11111111xxxxxx` | 14 | Skip 2-65 intervals (6-bit count) |
 //!
 //! # Internal Implementation
 //!
