@@ -1,9 +1,17 @@
 //! Visualize nibblerun encoded data as interactive SVG.
 
 use clap::Parser;
+use nibblerun::Encoder;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+
+/// Original reading from CSV for ground truth comparison
+#[derive(Debug, Clone)]
+struct CsvReading {
+    ts: u64,
+    value: i32,
+}
 
 const EPOCH_BASE: u64 = 1_760_000_000;
 const HEADER_SIZE: usize = 14;
@@ -11,19 +19,22 @@ const HEADER_SIZE: usize = 14;
 // Layout constants
 #[allow(dead_code)]
 const LEFT_WIDTH: usize = 280;
-const RIGHT_X: usize = 300;
+const RIGHT_X: usize = 340;
 const ROW_HEIGHT: usize = 24;
 const BIT_SIZE: usize = 14;
 const BIT_GAP: usize = 2;
 const MARGIN: usize = 20;
 const LEGEND_WIDTH: usize = 280;
-const LEGEND_X: usize = 820;
+const LEGEND_X: usize = 860;
+// Ground truth column (when CSV input)
+const GT_X: usize = 660;
+const GT_WIDTH: usize = 300;
 
 #[derive(Parser)]
 #[command(name = "nbl-viz")]
 #[command(about = "Visualize nibblerun encoded data as interactive SVG")]
 struct Args {
-    /// Input .nbl file
+    /// Input file (.nbl or .csv with ts,temperature columns)
     input: PathBuf,
 
     /// Output SVG file (default: input with .svg extension)
@@ -124,6 +135,18 @@ enum RowKind {
 struct Row {
     kind: RowKind,
     left_text: String,
+    /// Ground truth comparison (original CSV value if available, and whether it matches)
+    ground_truth: Option<GroundTruth>,
+}
+
+#[derive(Debug)]
+struct GroundTruth {
+    original_ts: u64,
+    original_value: i32,
+    decoded_ts: u64,
+    decoded_value: i32,
+    ts_matches: bool,
+    value_matches: bool,
 }
 
 struct BitReader<'a> {
@@ -389,6 +412,7 @@ fn build_rows(
     base_ts: u64,
     first_value: i32,
     interval: u16,
+    csv_readings: Option<&[CsvReading]>,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
 
@@ -397,58 +421,107 @@ fn build_rows(
         rows.push(Row {
             kind: RowKind::Header { span_id: span.id },
             left_text: span.kind.label(),
+            ground_truth: None,
         });
     }
 
     // First reading (from header)
+    let first_gt = csv_readings.and_then(|readings| {
+        readings.first().map(|r| GroundTruth {
+            original_ts: r.ts,
+            original_value: r.value,
+            decoded_ts: base_ts,
+            decoded_value: first_value,
+            ts_matches: r.ts == base_ts,
+            value_matches: r.value == first_value,
+        })
+    });
     rows.push(Row {
         kind: RowKind::Event { span_id: None, show_bits: false },
         left_text: format_event(0, base_ts, first_value, "(header)"),
+        ground_truth: first_gt,
     });
 
     // Data rows
     let mut value = first_value;
     let mut idx: u64 = 1;
     let mut event_num = 1;
+    let mut csv_idx = 1usize; // Start at 1, since 0 was used for header
 
     for span in data_spans {
         match &span.kind {
             SpanKind::Zero => {
                 let ts = base_ts + idx * interval as u64;
+                let gt = csv_readings.and_then(|readings| {
+                    readings.get(csv_idx).map(|r| GroundTruth {
+                        original_ts: r.ts,
+                        original_value: r.value,
+                        decoded_ts: ts,
+                        decoded_value: value,
+                        ts_matches: r.ts == ts,
+                        value_matches: r.value == value,
+                    })
+                });
                 rows.push(Row {
                     kind: RowKind::Event { span_id: Some(span.id), show_bits: true },
                     left_text: format_event(event_num, ts, value, "(=0)"),
+                    ground_truth: gt,
                 });
                 event_num += 1;
                 idx += 1;
+                csv_idx += 1;
             }
             SpanKind::ZeroRun8_21(n) | SpanKind::ZeroRun22_149(n) => {
                 for i in 0..*n {
                     let ts = base_ts + idx * interval as u64;
-                    // Only show bits on first row of run
                     let show_bits = i == 0;
+                    let gt = csv_readings.and_then(|readings| {
+                        readings.get(csv_idx).map(|r| GroundTruth {
+                            original_ts: r.ts,
+                            original_value: r.value,
+                            decoded_ts: ts,
+                            decoded_value: value,
+                            ts_matches: r.ts == ts,
+                            value_matches: r.value == value,
+                        })
+                    });
                     rows.push(Row {
                         kind: RowKind::Event { span_id: Some(span.id), show_bits },
                         left_text: format_event(event_num, ts, value, &format!("(run {}/{})", i + 1, n)),
+                        ground_truth: gt,
                     });
                     event_num += 1;
                     idx += 1;
+                    csv_idx += 1;
                 }
             }
             SpanKind::Delta1(d) | SpanKind::Delta2(d) | SpanKind::Delta3_10(d) | SpanKind::LargeDelta(d) => {
                 value += d;
                 let ts = base_ts + idx * interval as u64;
+                let gt = csv_readings.and_then(|readings| {
+                    readings.get(csv_idx).map(|r| GroundTruth {
+                        original_ts: r.ts,
+                        original_value: r.value,
+                        decoded_ts: ts,
+                        decoded_value: value,
+                        ts_matches: r.ts == ts,
+                        value_matches: r.value == value,
+                    })
+                });
                 rows.push(Row {
                     kind: RowKind::Event { span_id: Some(span.id), show_bits: true },
                     left_text: format_event(event_num, ts, value, &format!("({d:+})")),
+                    ground_truth: gt,
                 });
                 event_num += 1;
                 idx += 1;
+                csv_idx += 1;
             }
             SpanKind::SingleGap => {
                 rows.push(Row {
                     kind: RowKind::Gap { span_id: span.id },
                     left_text: "─── gap: 1 interval ───".to_string(),
+                    ground_truth: None,
                 });
                 idx += 1;
             }
@@ -456,6 +529,7 @@ fn build_rows(
                 rows.push(Row {
                     kind: RowKind::Gap { span_id: span.id },
                     left_text: format!("─── gap: {} intervals ───", n),
+                    ground_truth: None,
                 });
                 idx += *n as u64;
             }
@@ -467,10 +541,71 @@ fn build_rows(
 }
 
 fn format_event(num: usize, ts: u64, value: i32, delta: &str) -> String {
-    let offset = ts.saturating_sub(EPOCH_BASE);
-    let hours = offset / 3600;
-    let mins = (offset % 3600) / 60;
-    format!("#{:<3} {:02}:{:02}  val={:<4} {}", num, hours, mins, value, delta)
+    let time_str = format_timestamp(ts);
+    format!("#{:<3} {}  val={:<4} {}", num, time_str, value, delta)
+}
+
+/// Format a unix timestamp as human-readable date/time
+fn format_timestamp(ts: u64) -> String {
+    // Simple date calculation from unix timestamp
+    // Days since 1970-01-01
+    let secs_per_day: u64 = 86400;
+    let days_since_epoch = ts / secs_per_day;
+    let time_of_day = ts % secs_per_day;
+
+    let hours = time_of_day / 3600;
+    let mins = (time_of_day % 3600) / 60;
+    let secs = time_of_day % 60;
+
+    // Calculate year/month/day from days since epoch
+    // Using a simple algorithm for Gregorian calendar
+    let (year, month, day) = days_to_ymd(days_since_epoch);
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year, month, day, hours, mins, secs
+    )
+}
+
+/// Convert days since 1970-01-01 to (year, month, day)
+fn days_to_ymd(days: u64) -> (u32, u32, u32) {
+    let mut remaining_days = days as i64;
+
+    // Start from 1970
+    let mut year: u32 = 1970;
+
+    // Count years
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    // Count months
+    let days_in_months: [i64; 12] = if is_leap_year(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month: u32 = 1;
+    for days_in_month in days_in_months {
+        if remaining_days < days_in_month {
+            break;
+        }
+        remaining_days -= days_in_month;
+        month += 1;
+    }
+
+    let day = remaining_days as u32 + 1;
+    (year, month, day)
+}
+
+fn is_leap_year(year: u32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 fn get_bits_str(bytes: &[u8], start_bit: usize, length: usize) -> Vec<u8> {
@@ -486,12 +621,38 @@ fn get_bits_str(bytes: &[u8], start_bit: usize, length: usize) -> Vec<u8> {
     bits
 }
 
-fn render_svg(bytes: &[u8], header_spans: &[BitSpan], data_spans: &[BitSpan], rows: &[Row]) -> String {
+/// Stats for CSV compression summary
+struct CompressionStats {
+    raw_size: usize,
+    compressed_size: usize,
+    num_readings: usize,
+}
+
+impl CompressionStats {
+    fn ratio(&self) -> f64 {
+        if self.compressed_size == 0 {
+            0.0
+        } else {
+            self.raw_size as f64 / self.compressed_size as f64
+        }
+    }
+}
+
+fn render_svg(
+    bytes: &[u8],
+    header_spans: &[BitSpan],
+    data_spans: &[BitSpan],
+    rows: &[Row],
+    has_ground_truth: bool,
+    compression_stats: Option<&CompressionStats>,
+) -> String {
     let num_rows = rows.len();
     let legend_height = 460; // Fixed height for legend (9 encoding types)
-    let content_height = MARGIN * 2 + num_rows * ROW_HEIGHT + 40;
-    let total_height = content_height.max(legend_height + MARGIN * 2);
-    let total_width = LEGEND_X + LEGEND_WIDTH + MARGIN;
+    let stats_height = if compression_stats.is_some() { 60 } else { 0 };
+    let content_height = MARGIN * 2 + num_rows * ROW_HEIGHT + 40 + stats_height;
+    let total_height = content_height.max(legend_height + MARGIN * 2 + stats_height);
+    let legend_x = if has_ground_truth { LEGEND_X + GT_WIDTH } else { LEGEND_X };
+    let total_width = legend_x + LEGEND_WIDTH + MARGIN;
 
     let mut svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" font-family="monospace" font-size="11">
@@ -509,6 +670,14 @@ fn render_svg(bytes: &[u8], header_spans: &[BitSpan], data_spans: &[BitSpan], ro
     .legend-item {{ font-size: 10px; fill: #333; }}
     .legend-pattern {{ font-size: 9px; fill: #666; font-family: monospace; }}
     .legend-box {{ stroke: #ccc; stroke-width: 0.5; }}
+    .gt-match {{ fill: #4CAF50; }}
+    .gt-mismatch {{ fill: #F44336; font-weight: bold; }}
+    .gt-ts {{ fill: #666; font-size: 9px; }}
+    .gt-ts-mismatch {{ fill: #FF9800; font-size: 9px; }}
+    .stats-box {{ fill: #F5F5F5; stroke: #ddd; stroke-width: 1; }}
+    .stats-title {{ font-size: 12px; font-weight: bold; fill: #333; }}
+    .stats-text {{ font-size: 11px; fill: #333; }}
+    .stats-highlight {{ font-size: 13px; font-weight: bold; fill: #1976D2; }}
   </style>
   <rect width="100%" height="100%" fill="white"/>
 "#,
@@ -532,16 +701,45 @@ fn render_svg(bytes: &[u8], header_spans: &[BitSpan], data_spans: &[BitSpan], ro
 
     // Column headers
     svg.push_str(&format!(
-        r#"  <text x="{}" y="{}" class="section-title">EVENTS</text>
+        r#"  <text x="{}" y="{}" class="section-title">DECODED</text>
   <text x="{}" y="{}" class="section-title">BINARY</text>
   <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="1"/>
 "#,
-        MARGIN, MARGIN + 12,
-        RIGHT_X, MARGIN + 12,
-        RIGHT_X - 10, MARGIN, RIGHT_X - 10, total_height - MARGIN, "#ccc"
+        MARGIN, MARGIN + stats_height + 12,
+        RIGHT_X, MARGIN + stats_height + 12,
+        RIGHT_X - 10, MARGIN + stats_height, RIGHT_X - 10, total_height - MARGIN, "#ccc"
     ));
 
-    let start_y = MARGIN + 30;
+    // Ground truth column header (if CSV input)
+    if has_ground_truth {
+        svg.push_str(&format!(
+            r#"  <text x="{}" y="{}" class="section-title">CSV (ground truth)</text>
+  <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="1"/>
+"#,
+            GT_X, MARGIN + stats_height + 12,
+            GT_X - 10, MARGIN + stats_height, GT_X - 10, total_height - MARGIN, "#ccc"
+        ));
+    }
+
+    // Render compression stats box (if CSV input)
+    if let Some(stats) = compression_stats {
+        let box_width = total_width - MARGIN * 2;
+        svg.push_str(&format!(
+            r#"  <rect x="{}" y="{}" width="{}" height="50" class="stats-box" rx="4"/>
+  <text x="{}" y="{}" class="stats-title">COMPRESSION STATS</text>
+  <text x="{}" y="{}" class="stats-text">Raw: {} bytes ({} readings × 12 bytes)</text>
+  <text x="{}" y="{}" class="stats-text">Compressed: {} bytes</text>
+  <text x="{}" y="{}" class="stats-highlight">Ratio: {:.1}x ({:.1}% of original)</text>
+"#,
+            MARGIN, MARGIN, box_width,
+            MARGIN + 10, MARGIN + 18,
+            MARGIN + 10, MARGIN + 34, stats.raw_size, stats.num_readings,
+            MARGIN + 280, MARGIN + 34, stats.compressed_size,
+            MARGIN + 450, MARGIN + 34, stats.ratio(), 100.0 / stats.ratio(),
+        ));
+    }
+
+    let start_y = MARGIN + stats_height + 30;
 
     // Build a map from span_id to BitSpan for quick lookup
     let all_spans: Vec<_> = header_spans.iter().chain(data_spans.iter()).collect();
@@ -621,19 +819,53 @@ fn render_svg(bytes: &[u8], header_spans: &[BitSpan], data_spans: &[BitSpan], ro
             ));
         }
 
+        // Render ground truth comparison (if available)
+        if let Some(gt) = &row.ground_truth {
+            let value_class = if gt.value_matches { "gt-match" } else { "gt-mismatch" };
+
+            // Show value comparison
+            let value_text = if gt.value_matches {
+                format!("val={} ✓", gt.original_value)
+            } else {
+                format!("val={} (≠{})", gt.original_value, gt.decoded_value)
+            };
+
+            // Format timestamp with delta if mismatched
+            let ts_text = if gt.ts_matches {
+                format_timestamp(gt.original_ts)
+            } else {
+                let delta = gt.original_ts as i64 - gt.decoded_ts as i64;
+                let delta_str = if delta > 0 {
+                    format!("+{}s", delta)
+                } else {
+                    format!("{}s", delta)
+                };
+                format!("{} ({})", format_timestamp(gt.original_ts), delta_str)
+            };
+            let ts_class = if gt.ts_matches { "gt-ts" } else { "gt-ts-mismatch" };
+
+            svg.push_str(&format!(
+                r#"    <text x="{}" y="{}" class="{}">{}</text>
+    <text x="{}" y="{}" class="{}">{}</text>
+"#,
+                GT_X, y, value_class, value_text,
+                GT_X + 90, y, ts_class, ts_text
+            ));
+        }
+
         svg.push_str("  </g>\n");
     }
 
     // Render encoding rules legend
-    svg.push_str(&render_legend());
+    svg.push_str(&render_legend(legend_x));
 
     svg.push_str("</svg>\n");
     svg
 }
 
-fn render_legend() -> String {
+fn render_legend(legend_x: usize) -> String {
     let mut legend = String::new();
-    let x = LEGEND_X;
+    let x = legend_x;
     let mut y = MARGIN;
     let bg_color = "#FAFAFA";
     let line_color = "#ddd";
@@ -752,10 +984,83 @@ fn render_legend() -> String {
     legend
 }
 
+/// Read a CSV file with ts,temperature columns and encode it
+/// Returns (encoded_bytes, original_readings)
+fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), String> {
+    let file = File::open(path).map_err(|e| format!("Failed to open CSV: {}", e))?;
+    let reader = BufReader::new(file);
+
+    let mut encoder = Encoder::new();
+    let mut original_readings = Vec::new();
+    let mut line_num = 0;
+
+    for line in reader.lines() {
+        line_num += 1;
+        let line = line.map_err(|e| format!("Read error at line {}: {}", line_num, e))?;
+        let trimmed = line.trim();
+
+        // Skip empty lines and header
+        if trimmed.is_empty() || trimmed.starts_with("ts") || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.split(',').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+
+        let ts: u64 = parts[0]
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid timestamp at line {}: '{}'", line_num, parts[0]))?;
+
+        let temp: i32 = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| format!("Invalid temperature at line {}: '{}'", line_num, parts[1]))?;
+
+        // Skip sentinel values (gaps in original data)
+        if temp == -1000 {
+            continue;
+        }
+
+        // Store original reading for ground truth comparison
+        original_readings.push(CsvReading { ts, value: temp });
+
+        encoder
+            .append(ts, temp)
+            .map_err(|e| format!("Encode error at line {}: {:?}", line_num, e))?;
+    }
+
+    if original_readings.is_empty() {
+        return Err("No valid readings found in CSV".to_string());
+    }
+
+    eprintln!("Encoded {} readings from CSV", original_readings.len());
+    Ok((encoder.to_bytes(), original_readings))
+}
+
 fn main() {
     let args = Args::parse();
 
-    let bytes = fs::read(&args.input).expect("Failed to read input file");
+    // Determine if input is CSV or NBL based on extension
+    let is_csv = args
+        .input
+        .extension()
+        .map(|ext| ext.eq_ignore_ascii_case("csv"))
+        .unwrap_or(false);
+
+    let (bytes, csv_readings) = if is_csv {
+        match read_csv_and_encode(&args.input) {
+            Ok((b, readings)) => (b, Some(readings)),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        (fs::read(&args.input).expect("Failed to read input file"), None)
+    };
 
     if bytes.len() < HEADER_SIZE {
         eprintln!("Error: File too small to contain header");
@@ -764,9 +1069,29 @@ fn main() {
 
     let (header_spans, base_ts, _duration, count, first_value, interval) = parse_header(&bytes);
     let data_spans = parse_data(&bytes, count as usize, header_spans.len());
-    let rows = build_rows(&header_spans, &data_spans, base_ts, first_value, interval);
+    let rows = build_rows(
+        &header_spans,
+        &data_spans,
+        base_ts,
+        first_value,
+        interval,
+        csv_readings.as_deref(),
+    );
 
-    let svg = render_svg(&bytes, &header_spans, &data_spans, &rows);
+    let has_ground_truth = csv_readings.is_some();
+    let compression_stats = csv_readings.as_ref().map(|readings| CompressionStats {
+        raw_size: readings.len() * 12, // 8 bytes timestamp + 4 bytes value
+        compressed_size: bytes.len(),
+        num_readings: readings.len(),
+    });
+    let svg = render_svg(
+        &bytes,
+        &header_spans,
+        &data_spans,
+        &rows,
+        has_ground_truth,
+        compression_stats.as_ref(),
+    );
 
     let output = args.output.unwrap_or_else(|| {
         let mut p = args.input.clone();
@@ -779,5 +1104,34 @@ fn main() {
         .expect("Failed to write SVG");
 
     println!("Generated: {}", output.display());
-    println!("Rows: {} ({} header + {} events/gaps)", rows.len(), header_spans.len(), rows.len() - header_spans.len());
+    println!(
+        "Rows: {} ({} header + {} events/gaps)",
+        rows.len(),
+        header_spans.len(),
+        rows.len() - header_spans.len()
+    );
+
+    // Summary of ground truth comparison
+    if has_ground_truth {
+        let mut mismatches = 0;
+        let mut ts_mismatches = 0;
+        for row in &rows {
+            if let Some(gt) = &row.ground_truth {
+                if !gt.value_matches {
+                    mismatches += 1;
+                }
+                if !gt.ts_matches {
+                    ts_mismatches += 1;
+                }
+            }
+        }
+        if mismatches == 0 && ts_mismatches == 0 {
+            println!("Ground truth: All values and timestamps match ✓");
+        } else {
+            println!(
+                "Ground truth: {} value mismatches, {} timestamp mismatches",
+                mismatches, ts_mismatches
+            );
+        }
+    }
 }
