@@ -1,4 +1,4 @@
-.PHONY: build test clippy fmt coverage coverage-html fuzz fuzz-coverage clean
+.PHONY: build test clippy fmt bench coverage coverage-html fuzz fuzz-coverage clean
 
 build:
 	cargo build
@@ -11,6 +11,10 @@ clippy:
 
 fmt:
 	cargo fmt
+
+# Run benchmarks
+bench:
+	cargo bench
 
 # Run tests with coverage summary
 coverage:

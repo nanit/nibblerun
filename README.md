@@ -227,6 +227,37 @@ cargo fuzz run fuzz_decode
 cargo fuzz run fuzz_roundtrip -- -max_total_time=60
 ```
 
+## Benchmarks
+
+Run benchmarks using [Criterion](https://github.com/bheisler/criterion.rs):
+
+```bash
+# Run all benchmarks
+make bench
+# or
+cargo bench
+
+# Run specific benchmark group
+cargo bench --bench benchmarks -- encode
+cargo bench --bench benchmarks -- decode
+
+# Save baseline for comparison
+cargo bench --bench benchmarks -- --save-baseline v1
+
+# Compare against saved baseline
+cargo bench --bench benchmarks -- --baseline v1
+```
+
+HTML reports are generated at `target/criterion/report/index.html`.
+
+### Benchmark Groups
+
+| Group | Description |
+|-------|-------------|
+| `encode` | Encoding throughput (100, 1000, 10000 readings) |
+| `decode` | Decoding throughput (10000 readings) |
+| `roundtrip` | Full encode + decode cycle (1000 readings) |
+
 ## Code Coverage
 
 ### Prerequisites
