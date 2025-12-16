@@ -73,17 +73,16 @@
 //!
 //! ## Bit Accumulator
 //!
-//! Bits are accumulated in a 64-bit register (`bit_accum`) and flushed to the output
+//! Bits are accumulated in a 32-bit register (`bit_accum`) and flushed to the output
 //! buffer in 8-bit chunks when full. This avoids byte-alignment overhead and allows
 //! efficient variable-length encoding.
 //!
 //! ## Pending State Packing
 //!
-//! To keep the `Encoder` struct compact (72 bytes), multiple values are packed into
-//! a single `u64` field (`pending_state`):
-//! - Bits 0-5: Current bit accumulator count (0-63)
-//! - Bits 6-15: Pending reading count for averaging (0-1023)
-//! - Bits 16-47: Pending sum for averaging (i32 range)
+//! To keep the `Encoder` struct compact (56-64 bytes depending on value type),
+//! multiple values are packed into a single `u64` field (`pending_avg`):
+//! - Bits 0-9: Pending reading count for averaging (0-1023)
+//! - Bits 10-41: Pending sum for averaging (i32 range)
 //!
 //! This allows in-interval averaging without additional struct fields.
 //!

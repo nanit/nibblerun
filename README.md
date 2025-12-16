@@ -16,28 +16,28 @@ A high-performance time series compression library for Rust, optimized for tempe
 use nibblerun::{Encoder, decode};
 
 // Create encoder with 5-minute (300-second) intervals
-let mut enc = Encoder::with_interval(300);
+let mut enc: Encoder<i32> = Encoder::new(300);
 
-// Append readings (timestamp, temperature)
+// Append readings (timestamp, value)
 // Readings are quantized to interval boundaries
-enc.append(1700000000, 23).unwrap();  // 00:00:00 -> interval 0
-enc.append(1700000150, 25).unwrap();  // 00:02:30 -> same interval, averaged with above
-enc.append(1700000300, 24).unwrap();  // 00:05:00 -> interval 1
-enc.append(1700000600, 22).unwrap();  // 00:10:00 -> interval 2
+enc.append(1761000000, 23).unwrap();  // 00:00:00 -> interval 0
+enc.append(1761000150, 25).unwrap();  // 00:02:30 -> same interval, averaged with above
+enc.append(1761000300, 24).unwrap();  // 00:05:00 -> interval 1
+enc.append(1761000600, 22).unwrap();  // 00:10:00 -> interval 2
 
 // Serialize to bytes
 let bytes = enc.to_bytes();
 println!("Compressed size: {} bytes", bytes.len());
 
-// Decode back
-let readings = decode(&bytes);
+// Decode back (interval must match encoding)
+let readings = decode::<i32>(&bytes, 300);
 for r in readings {
-    println!("ts: {}, temp: {}", r.ts, r.temperature);
+    println!("ts: {}, value: {}", r.ts, r.value);
 }
 // Output:
-// ts: 1700000000, temp: 24  (average of 23 and 25)
-// ts: 1700000300, temp: 24
-// ts: 1700000600, temp: 22
+// ts: 1761000000, value: 24  (average of 23 and 25)
+// ts: 1761000300, value: 24
+// ts: 1761000600, value: 22
 ```
 
 ### Handling Gaps
@@ -47,12 +47,12 @@ Missing intervals are preserved in the output:
 ```rust
 use nibblerun::Encoder;
 
-let mut enc = Encoder::with_interval(300);
+let mut enc: Encoder<i32> = Encoder::new(300);
 
-enc.append(1700000000, 22).unwrap();   // 00:00 - interval 0
-enc.append(1700000300, 23).unwrap();   // 00:05 - interval 1
+enc.append(1761000000, 22).unwrap();   // 00:00 - interval 0
+enc.append(1761000300, 23).unwrap();   // 00:05 - interval 1
 // No data for 00:10, 00:15, 00:20...
-enc.append(1700003000, 25).unwrap();   // 00:50 - interval 10
+enc.append(1761003000, 25).unwrap();   // 00:50 - interval 10
 
 let readings = enc.decode();
 assert_eq!(readings.len(), 3);
@@ -104,48 +104,47 @@ Missing intervals (sensor offline, network issues) are encoded efficiently:
 
 ### Wire Format
 
-The encoded format consists of a 14-byte header followed by bit-packed data:
+The encoded format consists of a header (7-10 bytes depending on value type) followed by bit-packed data:
 
 ```
-Header (14 bytes):
-┌─────────────────┬─────────┬─────────┬────────────┬──────────┐
-│ base_ts_offset  │duration │  count  │ first_temp │ interval │
-│    (4 bytes)    │(2 bytes)│(2 bytes)│  (4 bytes) │ (2 bytes)│
-└─────────────────┴─────────┴─────────┴────────────┴──────────┘
+Header (10 bytes for i32, 8 for i16, 7 for i8):
+┌─────────────────┬─────────┬─────────────┐
+│ base_ts_offset  │  count  │ first_value │
+│    (4 bytes)    │(2 bytes)│  (1/2/4)    │
+└─────────────────┴─────────┴─────────────┘
 
 Data: Variable-length bit-packed deltas and zero-runs
 ```
 
 - `base_ts_offset`: First timestamp minus epoch base (1,760,000,000)
-- `duration`: Number of intervals spanned
 - `count`: Number of readings (max 65,535)
-- `first_temp`: First temperature as i32
-- `interval`: Interval in seconds (1-65,535)
+- `first_value`: First value (size depends on type: i8=1, i16=2, i32=4 bytes)
+
+Note: The interval is NOT stored in the header - it must be provided to the decoder.
 
 ### Memory Layout
 
-The `Encoder` struct is optimized for cache efficiency (72 bytes):
+The `Encoder<V>` struct is optimized for cache efficiency (56-64 bytes depending on value type):
 
 ```rust
-Encoder {
-    base_ts: u64,        // First timestamp
-    last_ts: u64,        // Most recent timestamp
-    bit_accum: u64,      // Bit accumulator for encoding
-    pending_state: u64,  // Packed: bit count + pending avg state
-    data: Vec<u8>,       // Encoded output buffer
-    prev_temp: i32,      // Previous temperature (for delta)
-    first_temp: i32,     // First temperature (for header)
-    zero_run: u32,       // Current zero-run length
+Encoder<V> {
+    pending_avg: u64,      // Packed averaging state (count + sum)
+    bit_accum: u32,        // Bit accumulator for encoding
+    data: Vec<u8>,         // Encoded output buffer (24 bytes on 64-bit)
+    base_ts_offset: u32,   // First timestamp minus epoch base
+    zero_run: u16,         // Current zero-run length
+    first_value: V,        // First value (for header)
+    prev_value: V,         // Previous value (for delta)
     prev_logical_idx: u32, // Previous interval index
-    count: u16,          // Reading count
-    interval: u16,       // Interval in seconds
+    count: u16,            // Reading count
+    interval: u16,         // Interval in seconds
+    bit_count: u8,         // Bit accumulator count (0-31)
 }
 ```
 
-The `pending_state` field packs multiple values to avoid extra fields:
-- Bits 0-5: Bit accumulator count (0-63)
-- Bits 6-15: Pending reading count for averaging (0-1023)
-- Bits 16-47: Pending sum for averaging (full i32 range)
+The `pending_avg` field packs multiple values to avoid extra fields:
+- Bits 0-9: Pending reading count for averaging (0-1023)
+- Bits 10-41: Pending sum for averaging (full i32 range)
 
 ## Assumptions and Limitations
 
@@ -170,7 +169,7 @@ The `pending_state` field packs multiple values to avoid extra fields:
 - **Encoding**: O(1) per reading, ~250M readings/second
 - **Decoding**: O(n) where n = reading count
 - **Compression**: ~40-50 bytes/day for typical temperature data (vs ~3.5KB raw)
-- **Memory**: 72 bytes per encoder + output buffer
+- **Memory**: 56-64 bytes per encoder (depends on value type) + output buffer
 
 ## Real-World Data Analysis
 
