@@ -227,6 +227,59 @@ cargo fuzz run fuzz_decode
 cargo fuzz run fuzz_roundtrip -- -max_total_time=60
 ```
 
+## Code Coverage
+
+### Prerequisites
+
+Install the required tools:
+
+```bash
+# Install cargo-llvm-cov for unit test coverage
+cargo install cargo-llvm-cov
+
+# Install cargo-fuzz for fuzz testing (requires nightly)
+cargo install cargo-fuzz
+
+# Install llvm-tools for fuzz coverage reports
+rustup component add llvm-tools-preview
+rustup component add --toolchain nightly llvm-tools-preview
+```
+
+### Running Coverage
+
+Using the Makefile:
+
+```bash
+# Unit test coverage summary
+make coverage
+
+# Unit test coverage with HTML report
+make coverage-html
+# Report at: target/llvm-cov/html/index.html
+
+# Run all fuzz targets (30 seconds each)
+make fuzz
+
+# Generate combined fuzz coverage report
+make fuzz-coverage
+```
+
+Or manually:
+
+```bash
+# Unit test coverage
+cargo llvm-cov --summary-only
+cargo llvm-cov --html
+
+# Fuzz coverage (single target)
+cargo +nightly fuzz run fuzz_decode -- -max_total_time=30
+cargo +nightly fuzz coverage fuzz_decode
+```
+
+### Current Coverage
+
+Unit tests achieve ~98% line coverage across all source files.
+
 ## License
 
 MIT
