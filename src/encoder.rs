@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
 use crate::constants::{
-    cold_gap_handler, div_by_interval, encode_zero_run, pack_pending, rounded_avg, unpack_pending,
+    cold_gap_handler, div_by_interval, encode_zero_run, pack_avg, rounded_avg, unpack_avg,
     DELTA_ENCODE, EPOCH_BASE,
 };
 use crate::error::AppendError;
@@ -15,21 +15,22 @@ use crate::value::Value;
 ///
 /// Accumulates sensor readings and produces compressed output.
 /// Generic over value type V (i8, i16, or i32) for compile-time type safety.
-#[repr(C)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Encoder<V: Value> {
-    base_ts: u64,
-    last_ts: u64,
-    bit_accum: u64,
-    /// Packed state: bits 0-5 = `bit_accum_count`, bits 6-15 = `pending_count` (0-1023), bits 16-47 = `pending_sum`
-    pending_state: u64,
+    /// Packed averaging state: bits 0-9 = `pending_count` (0-1023), bits 10-41 = `pending_sum`
+    pending_avg: u64,
+    bit_accum: u32,
     data: Vec<u8>,
-    prev_temp: i32,
-    first_temp: i32,
-    zero_run: u32,
+    /// Offset from EPOCH_BASE (saves 4 bytes vs storing full u64 timestamp)
+    base_ts_offset: u32,
+    zero_run: u16,
+    first_value: V,
+    prev_value: V,
     prev_logical_idx: u32,
     count: u16,
     interval: u16,
+    /// Bit accumulator count (0-63) - separate field for fast access in write_bits
+    bit_count: u8,
     #[serde(skip)]
     _marker: PhantomData<V>,
 }
@@ -43,17 +44,17 @@ impl<V: Value> Encoder<V> {
     #[must_use]
     pub fn new(interval: u16) -> Self {
         Self {
-            base_ts: 0,
-            last_ts: 0,
             bit_accum: 0,
+            pending_avg: 0,
             data: Vec::with_capacity(48),
-            prev_temp: 0,
-            first_temp: 0,
+            base_ts_offset: 0,
             zero_run: 0,
-            pending_state: 0,
+            first_value: V::default(),
+            prev_value: V::default(),
             prev_logical_idx: 0,
             count: 0,
             interval,
+            bit_count: 0,
             _marker: PhantomData,
         }
     }
@@ -63,6 +64,12 @@ impl<V: Value> Encoder<V> {
     #[must_use]
     pub const fn interval(&self) -> u16 {
         self.interval
+    }
+
+    /// Get the base timestamp (reconstructed from offset)
+    #[inline]
+    fn base_ts(&self) -> u64 {
+        EPOCH_BASE + u64::from(self.base_ts_offset)
     }
 
     /// Header size for this encoder's value type
@@ -94,27 +101,24 @@ impl<V: Value> Encoder<V> {
 
         // First reading - initialize pending state
         if self.count == 0 {
-            self.base_ts = ts;
-            self.last_ts = ts;
-            self.first_temp = value;
-            self.prev_temp = value;
+            self.base_ts_offset = ts.wrapping_sub(EPOCH_BASE) as u32;
+            self.first_value = V::from_i32(value);
+            self.prev_value = V::from_i32(value);
             self.prev_logical_idx = 0;
             self.count = 1;
             // Initialize pending: count=1, sum=value
-            self.pending_state = pack_pending(0, 1, value);
+            self.pending_avg = pack_avg(1, value);
             return Ok(());
         }
 
         // Reject out-of-order readings (ts before base_ts)
-        if ts < self.base_ts {
-            return Err(AppendError::TimestampBeforeBase {
-                ts,
-                base_ts: self.base_ts,
-            });
+        let base_ts = self.base_ts();
+        if ts < base_ts {
+            return Err(AppendError::TimestampBeforeBase { ts, base_ts });
         }
 
-        // Calculate logical index
-        let logical_idx = div_by_interval(ts - self.base_ts, self.interval) as u32;
+        // Calculate logical index (u32 supports ~40,000 years at 300s intervals)
+        let logical_idx = div_by_interval(ts - base_ts, self.interval) as u32;
 
         // Reject readings that go backwards in time
         if logical_idx < self.prev_logical_idx {
@@ -127,12 +131,11 @@ impl<V: Value> Encoder<V> {
 
         // Same interval - accumulate for averaging
         if logical_idx == self.prev_logical_idx {
-            let (bits, count, sum) = unpack_pending(self.pending_state);
+            let (count, sum) = unpack_avg(self.pending_avg);
             if count >= 1023 {
                 return Err(AppendError::IntervalOverflow { count });
             }
-            self.pending_state = pack_pending(bits, count + 1, sum.saturating_add(value));
-            self.last_ts = ts;
+            self.pending_avg = pack_avg(count + 1, sum.saturating_add(value));
             return Ok(());
         }
 
@@ -144,14 +147,15 @@ impl<V: Value> Encoder<V> {
         }
 
         // Check delta overflow: compute what the delta would be after finalizing
-        let (_, pending_count, pending_sum) = unpack_pending(self.pending_state);
+        let (pending_count, pending_sum) = unpack_avg(self.pending_avg);
         if pending_count > 0 && self.count > 1 {
             let avg = rounded_avg(pending_sum, pending_count);
-            let delta = avg - self.prev_temp;
+            let prev = self.prev_value.to_i32();
+            let delta = avg - prev;
             if !(-1024..=1023).contains(&delta) {
                 return Err(AppendError::DeltaOverflow {
                     delta,
-                    prev_value: self.prev_temp,
+                    prev_value: prev,
                     new_value: avg,
                 });
             }
@@ -166,16 +170,14 @@ impl<V: Value> Encoder<V> {
         if index_gap > 1 {
             cold_gap_handler();
             self.flush_zeros();
-            self.write_gaps(index_gap - 1);
+            self.write_gaps(u32::from(index_gap - 1));
         }
 
         // Start accumulating for new interval
         self.prev_logical_idx = logical_idx;
-        self.last_ts = ts;
         self.count += 1;
         // Initialize pending for new interval: count=1, sum=value
-        let (bits, _, _) = unpack_pending(self.pending_state);
-        self.pending_state = pack_pending(bits, 1, value);
+        self.pending_avg = pack_avg(1, value);
 
         Ok(())
     }
@@ -184,7 +186,7 @@ impl<V: Value> Encoder<V> {
     /// Called when crossing to a new interval or when serializing
     #[inline]
     fn finalize_pending_interval(&mut self) {
-        let (_, count, sum) = unpack_pending(self.pending_state);
+        let (count, sum) = unpack_avg(self.pending_avg);
         if count == 0 {
             return;
         }
@@ -192,12 +194,12 @@ impl<V: Value> Encoder<V> {
         // Compute average with proper rounding (round half away from zero)
         let avg = rounded_avg(sum, count);
 
-        // For the first interval, update first_temp to the average
+        // For the first interval, update first_value to the average
         if self.count == 1 {
-            self.first_temp = avg;
+            self.first_value = V::from_i32(avg);
         } else {
             // Encode delta from previous interval's average
-            let delta = avg - self.prev_temp;
+            let delta = avg - self.prev_value.to_i32();
             if delta == 0 {
                 self.zero_run += 1;
             } else {
@@ -205,11 +207,10 @@ impl<V: Value> Encoder<V> {
                 self.encode_delta(delta);
             }
         }
-        self.prev_temp = avg;
+        self.prev_value = V::from_i32(avg);
 
-        // Clear pending state (re-extract bits after any encoding that may have occurred)
-        let (bits, _, _) = unpack_pending(self.pending_state);
-        self.pending_state = u64::from(bits); // Clear pending count/sum, keep actual bits
+        // Clear pending averaging state
+        self.pending_avg = 0;
     }
 
     #[inline]
@@ -243,7 +244,8 @@ impl<V: Value> Encoder<V> {
         let header_size = Self::header_size();
 
         // Extract pending state
-        let (actual_bits, pending_count, pending_sum) = unpack_pending(self.pending_state);
+        let (pending_count, pending_sum) = unpack_avg(self.pending_avg);
+        let actual_bits = u32::from(self.bit_count);
 
         // For single interval, no additional bits needed
         if self.count == 1 {
@@ -251,17 +253,17 @@ impl<V: Value> Encoder<V> {
         }
 
         // Calculate the final interval's delta and its encoding size
-        let mut zeros = self.zero_run;
+        let mut zeros = u32::from(self.zero_run);
         let mut extra_bits = 0u32;
 
         if pending_count > 0 {
             let final_avg = rounded_avg(pending_sum, pending_count);
-            let delta = final_avg - self.prev_temp;
+            let delta = final_avg - self.prev_value.to_i32();
             if delta == 0 {
                 zeros += 1;
             } else {
                 // Need to encode zeros first, then the delta
-                extra_bits += Self::zero_run_bits(self.zero_run);
+                extra_bits += Self::zero_run_bits(u32::from(self.zero_run));
                 zeros = 0; // zeros already accounted for
                 extra_bits += Self::delta_bits(delta);
             }
@@ -333,26 +335,28 @@ impl<V: Value> Encoder<V> {
         }
 
         // Extract pending state
-        let (actual_bits, pending_count, pending_sum) = unpack_pending(self.pending_state);
+        let (pending_count, pending_sum) = unpack_avg(self.pending_avg);
+        let actual_bits = u32::from(self.bit_count);
 
         // Compute the average for the final pending interval
         let final_avg = if pending_count > 0 {
             rounded_avg(pending_sum, pending_count)
         } else {
-            self.prev_temp
+            self.prev_value.to_i32()
         };
 
-        // For single interval, first_temp is the average
-        let first_temp = if self.count == 1 {
-            final_avg
+        // For single interval, first_value is the average
+        let first_val = if self.count == 1 {
+            V::from_i32(final_avg)
         } else {
-            self.first_temp
+            self.first_value
         };
 
+        let base_ts = self.base_ts();
         let mut decoded = Vec::with_capacity(self.count as usize);
         decoded.push(Reading {
-            ts: self.base_ts,
-            value: V::from_i32(first_temp),
+            ts: base_ts,
+            value: first_val,
         });
 
         if self.count == 1 {
@@ -363,10 +367,10 @@ impl<V: Value> Encoder<V> {
         let mut final_data = self.data.clone();
         let mut accum = self.bit_accum;
         let mut bits = actual_bits;
-        let mut zeros = self.zero_run;
+        let mut zeros = self.zero_run as u32;
 
         // Helper to flush complete bytes from accumulator
-        let flush_bytes = |accum: &mut u64, bits: &mut u32, out: &mut Vec<u8>| {
+        let flush_bytes = |accum: &mut u32, bits: &mut u32, out: &mut Vec<u8>| {
             while *bits >= 8 {
                 *bits -= 8;
                 out.push((*accum >> *bits) as u8);
@@ -375,21 +379,21 @@ impl<V: Value> Encoder<V> {
 
         // For multi-interval encoders, encode the final interval's delta
         if pending_count > 0 {
-            let delta = final_avg - self.prev_temp;
+            let delta = final_avg - self.prev_value.to_i32();
             if delta == 0 {
                 zeros += 1;
             } else {
                 // First flush pending zeros
                 while zeros > 0 {
                     let (b, n, c) = encode_zero_run(zeros);
-                    accum = (accum << n) | u64::from(b);
+                    accum = (accum << n) | b;
                     bits += n;
                     zeros -= c;
                     flush_bytes(&mut accum, &mut bits, &mut final_data);
                 }
                 // Encode the delta
                 let (delta_bits, delta_num_bits) = Self::encode_delta_value(delta);
-                accum = (accum << delta_num_bits) | u64::from(delta_bits);
+                accum = (accum << delta_num_bits) | delta_bits;
                 bits += delta_num_bits;
                 flush_bytes(&mut accum, &mut bits, &mut final_data);
             }
@@ -398,7 +402,7 @@ impl<V: Value> Encoder<V> {
         // Flush remaining zeros
         while zeros > 0 {
             let (b, n, c) = encode_zero_run(zeros);
-            accum = (accum << n) | u64::from(b);
+            accum = (accum << n) | b;
             bits += n;
             zeros -= c;
             flush_bytes(&mut accum, &mut bits, &mut final_data);
@@ -412,7 +416,7 @@ impl<V: Value> Encoder<V> {
         }
 
         let mut reader = BitReader::new(&final_data);
-        let mut prev_temp = first_temp; // Use computed first_temp (may be averaged)
+        let mut prev_val = first_val.to_i32(); // Use computed first_val (may be averaged)
         let mut idx = 1u64;
         let count = self.count as usize;
 
@@ -431,18 +435,18 @@ impl<V: Value> Encoder<V> {
             if reader.read_bits(1) == 0 {
                 // 0 = zero delta
                 decoded.push(Reading {
-                    ts: self.base_ts + idx * interval,
-                    value: V::from_i32(prev_temp),
+                    ts: base_ts + idx * interval,
+                    value: V::from_i32(prev_val),
                 });
                 idx += 1;
                 continue;
             }
             if reader.read_bits(1) == 0 {
                 // 10x = ±1 delta
-                prev_temp += if reader.read_bits(1) == 0 { 1 } else { -1 };
+                prev_val += if reader.read_bits(1) == 0 { 1 } else { -1 };
                 decoded.push(Reading {
-                    ts: self.base_ts + idx * interval,
-                    value: V::from_i32(prev_temp),
+                    ts: base_ts + idx * interval,
+                    value: V::from_i32(prev_val),
                 });
                 idx += 1;
                 continue;
@@ -456,10 +460,10 @@ impl<V: Value> Encoder<V> {
             // 111...
             if reader.read_bits(1) == 0 {
                 // 1110x = ±2 delta
-                prev_temp += if reader.read_bits(1) == 0 { 2 } else { -2 };
+                prev_val += if reader.read_bits(1) == 0 { 2 } else { -2 };
                 decoded.push(Reading {
-                    ts: self.base_ts + idx * interval,
-                    value: V::from_i32(prev_temp),
+                    ts: base_ts + idx * interval,
+                    value: V::from_i32(prev_val),
                 });
                 idx += 1;
                 continue;
@@ -472,8 +476,8 @@ impl<V: Value> Encoder<V> {
                         break;
                     }
                     decoded.push(Reading {
-                        ts: self.base_ts + idx * interval,
-                        value: V::from_i32(prev_temp),
+                        ts: base_ts + idx * interval,
+                        value: V::from_i32(prev_val),
                     });
                     idx += 1;
                 }
@@ -487,8 +491,8 @@ impl<V: Value> Encoder<V> {
                         break;
                     }
                     decoded.push(Reading {
-                        ts: self.base_ts + idx * interval,
-                        value: V::from_i32(prev_temp),
+                        ts: base_ts + idx * interval,
+                        value: V::from_i32(prev_val),
                     });
                     idx += 1;
                 }
@@ -498,10 +502,10 @@ impl<V: Value> Encoder<V> {
             if reader.read_bits(1) == 0 {
                 // 1111110xxxx = ±3-10 delta
                 let e = reader.read_bits(4) as i32;
-                prev_temp += if e < 8 { e - 10 } else { e - 5 };
+                prev_val += if e < 8 { e - 10 } else { e - 5 };
                 decoded.push(Reading {
-                    ts: self.base_ts + idx * interval,
-                    value: V::from_i32(prev_temp),
+                    ts: base_ts + idx * interval,
+                    value: V::from_i32(prev_val),
                 });
                 idx += 1;
                 continue;
@@ -510,14 +514,14 @@ impl<V: Value> Encoder<V> {
             if reader.read_bits(1) == 0 {
                 // 11111110xxxxxxxxxxx = large delta (±11-1023)
                 let raw = reader.read_bits(11);
-                prev_temp += if raw & 0x400 != 0 {
+                prev_val += if raw & 0x400 != 0 {
                     (raw | 0xFFFF_F800) as i32
                 } else {
                     raw as i32
                 };
                 decoded.push(Reading {
-                    ts: self.base_ts + idx * interval,
-                    value: V::from_i32(prev_temp),
+                    ts: base_ts + idx * interval,
+                    value: V::from_i32(prev_val),
                 });
                 idx += 1;
             } else {
@@ -539,35 +543,32 @@ impl<V: Value> Encoder<V> {
         let header_size = Self::header_size();
 
         // Extract pending state
-        let (actual_bits, pending_count, pending_sum) = unpack_pending(self.pending_state);
+        let (pending_count, pending_sum) = unpack_avg(self.pending_avg);
+        let actual_bits = u32::from(self.bit_count);
 
         // Compute the average for the final pending interval
         let final_avg = if pending_count > 0 {
             rounded_avg(pending_sum, pending_count)
         } else {
-            self.prev_temp
+            self.prev_value.to_i32()
         };
 
-        // For single interval, first_temp is the average
-        let first_temp = if self.count == 1 {
-            final_avg
+        // For single interval, first_value is the average
+        let first_val = if self.count == 1 {
+            V::from_i32(final_avg)
         } else {
-            self.first_temp
+            self.first_value
         };
 
         let mut result = Vec::with_capacity(header_size + self.data.len() + 4);
 
         // Header: base_ts_offset (4) + count (2) + first_value (V::BYTES)
-        // Use wrapping_sub for consistent behavior in debug/release modes
-        // Note: timestamps before EPOCH_BASE will produce incorrect data
-        let base_ts_offset = self.base_ts.wrapping_sub(EPOCH_BASE) as u32;
-        result.extend_from_slice(&base_ts_offset.to_le_bytes()); // offset 0: 4 bytes
+        result.extend_from_slice(&self.base_ts_offset.to_le_bytes()); // offset 0: 4 bytes
         result.extend_from_slice(&self.count.to_le_bytes()); // offset 4: 2 bytes
 
         // Write first_value with appropriate size for V
-        let first_value = V::from_i32(first_temp);
         let mut value_buf = [0u8; 4];
-        first_value.write_le(&mut value_buf);
+        first_val.write_le(&mut value_buf);
         result.extend_from_slice(&value_buf[..V::BYTES]); // offset 6: V::BYTES bytes
 
         // Data
@@ -576,10 +577,10 @@ impl<V: Value> Encoder<V> {
         // Finalize pending bits and zeros, plus the final interval's delta
         let mut accum = self.bit_accum;
         let mut bits = actual_bits;
-        let mut zeros = self.zero_run;
+        let mut zeros = self.zero_run as u32;
 
         // Helper to flush complete bytes from accumulator
-        let flush_bytes = |accum: &mut u64, bits: &mut u32, out: &mut Vec<u8>| {
+        let flush_bytes = |accum: &mut u32, bits: &mut u32, out: &mut Vec<u8>| {
             while *bits >= 8 {
                 *bits -= 8;
                 out.push((*accum >> *bits) as u8);
@@ -588,21 +589,21 @@ impl<V: Value> Encoder<V> {
 
         // For multi-interval encoders, encode the final interval's delta
         if self.count > 1 && pending_count > 0 {
-            let delta = final_avg - self.prev_temp;
+            let delta = final_avg - self.prev_value.to_i32();
             if delta == 0 {
                 zeros += 1;
             } else {
                 // First flush pending zeros
                 while zeros > 0 {
                     let (b, n, c) = encode_zero_run(zeros);
-                    accum = (accum << n) | u64::from(b);
+                    accum = (accum << n) | b;
                     bits += n;
                     zeros -= c;
                     flush_bytes(&mut accum, &mut bits, &mut result);
                 }
                 // Encode the delta
                 let (delta_bits, delta_num_bits) = Self::encode_delta_value(delta);
-                accum = (accum << delta_num_bits) | u64::from(delta_bits);
+                accum = (accum << delta_num_bits) | delta_bits;
                 bits += delta_num_bits;
                 flush_bytes(&mut accum, &mut bits, &mut result);
             }
@@ -611,7 +612,7 @@ impl<V: Value> Encoder<V> {
         // Flush remaining zeros
         while zeros > 0 {
             let (b, n, c) = encode_zero_run(zeros);
-            accum = (accum << n) | u64::from(b);
+            accum = (accum << n) | b;
             bits += n;
             zeros -= c;
             flush_bytes(&mut accum, &mut bits, &mut result);
@@ -647,28 +648,22 @@ impl<V: Value> Encoder<V> {
 
     #[inline]
     fn write_bits(&mut self, value: u32, num_bits: u32) {
-        // Extract actual bits and pending state
-        let (mut bits, pending_count, pending_sum) = unpack_pending(self.pending_state);
-
-        self.bit_accum = (self.bit_accum << num_bits) | u64::from(value);
-        bits += num_bits;
+        self.bit_accum = (self.bit_accum << num_bits) | value;
+        self.bit_count += num_bits as u8;
 
         // Flush complete bytes to prevent overflow
-        while bits >= 8 {
-            bits -= 8;
-            self.data.push((self.bit_accum >> bits) as u8);
+        while self.bit_count >= 8 {
+            self.bit_count -= 8;
+            self.data.push((self.bit_accum >> self.bit_count) as u8);
         }
-
-        // Repack with pending state preserved
-        self.pending_state = pack_pending(bits, pending_count, pending_sum);
     }
 
     #[inline]
     fn flush_zeros(&mut self) {
         while self.zero_run > 0 {
-            let (bits, num_bits, consumed) = encode_zero_run(self.zero_run);
+            let (bits, num_bits, consumed) = encode_zero_run(u32::from(self.zero_run));
             self.write_bits(bits, num_bits);
-            self.zero_run -= consumed;
+            self.zero_run -= consumed as u16;
         }
     }
 

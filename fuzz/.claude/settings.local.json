@@ -25,7 +25,10 @@
       "Bash(cat:*)",
       "Bash(sort:*)",
       "Bash(find:*)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(llvm-profdata merge:*)",
+      "Bash(for target in fuzz_decode fuzz_roundtrip fuzz_gaps fuzz_idempotent fuzz_lossy_bounds fuzz_single_reading fuzz_averaging fuzz_lossless)",
+      "Bash(timeout 10s cargo +nightly fuzz run:*)"
     ],
     "deny": [],
     "ask": []

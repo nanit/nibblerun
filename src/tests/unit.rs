@@ -2227,3 +2227,121 @@ fn test_all_encoding_prefixes() {
         assert_eq!(r.ts, expected_ts[i], "Timestamp mismatch at index {}", i);
     }
 }
+
+#[test]
+fn test_large_gap_exceeding_u16() {
+    // Test that gaps larger than u16::MAX intervals are handled correctly
+    // by emitting multiple gap markers
+    let base_ts = EPOCH_BASE;
+    let interval: u16 = 300;
+    let mut enc = Encoder::<i32>::new(interval);
+
+    // Add first reading
+    enc.append(base_ts, 100).unwrap();
+
+    // Add second reading at gap of 70,000 intervals (exceeds u16::MAX = 65535)
+    let large_gap: u64 = 70_000;
+    let second_ts = base_ts + large_gap * u64::from(interval);
+    enc.append(second_ts, 200).unwrap();
+
+    // Should have 2 readings
+    assert_eq!(enc.count(), 2);
+
+    // Decode and verify
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 2);
+
+    // First reading
+    assert_eq!(decoded[0].ts, base_ts);
+    assert_eq!(decoded[0].value, 100);
+
+    // Second reading - should be at correct timestamp
+    assert_eq!(decoded[1].ts, second_ts);
+    assert_eq!(decoded[1].value, 200);
+
+    // Verify via to_bytes/decode roundtrip
+    let bytes = enc.to_bytes();
+    let decoded_from_bytes = decode::<i32>(&bytes, u64::from(interval));
+    assert_eq!(decoded_from_bytes.len(), 2);
+    assert_eq!(decoded_from_bytes[0].ts, base_ts);
+    assert_eq!(decoded_from_bytes[0].value, 100);
+    assert_eq!(decoded_from_bytes[1].ts, second_ts);
+    assert_eq!(decoded_from_bytes[1].value, 200);
+}
+
+#[test]
+fn test_very_large_gap_100k_intervals() {
+    // Even larger gap to stress test multiple gap marker emission
+    let base_ts = EPOCH_BASE;
+    let interval: u16 = 300;
+    let mut enc = Encoder::<i32>::new(interval);
+
+    enc.append(base_ts, 50).unwrap();
+
+    // Gap of 100,000 intervals
+    let large_gap: u64 = 100_000;
+    let second_ts = base_ts + large_gap * u64::from(interval);
+    enc.append(second_ts, 75).unwrap();
+
+    // Add a third reading shortly after
+    let third_ts = second_ts + u64::from(interval);
+    enc.append(third_ts, 76).unwrap();
+
+    assert_eq!(enc.count(), 3);
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 3);
+
+    assert_eq!(decoded[0].ts, base_ts);
+    assert_eq!(decoded[0].value, 50);
+
+    assert_eq!(decoded[1].ts, second_ts);
+    assert_eq!(decoded[1].value, 75);
+
+    assert_eq!(decoded[2].ts, third_ts);
+    assert_eq!(decoded[2].value, 76);
+}
+
+#[test]
+fn test_gap_at_u16_boundary() {
+    // Test gaps right at u16::MAX to ensure boundary handling
+    let base_ts = EPOCH_BASE;
+    let interval: u16 = 1; // 1 second interval for faster test
+    let mut enc = Encoder::<i32>::new(interval);
+
+    enc.append(base_ts, 10).unwrap();
+
+    // Gap exactly at u16::MAX
+    let gap: u64 = u64::from(u16::MAX);
+    let second_ts = base_ts + gap * u64::from(interval);
+    enc.append(second_ts, 20).unwrap();
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].ts, base_ts);
+    assert_eq!(decoded[0].value, 10);
+    assert_eq!(decoded[1].ts, second_ts);
+    assert_eq!(decoded[1].value, 20);
+}
+
+#[test]
+fn test_gap_just_over_u16_max() {
+    // Test gap just over u16::MAX (65536 intervals)
+    let base_ts = EPOCH_BASE;
+    let interval: u16 = 1;
+    let mut enc = Encoder::<i32>::new(interval);
+
+    enc.append(base_ts, 10).unwrap();
+
+    // Gap of u16::MAX + 1
+    let gap: u64 = u64::from(u16::MAX) + 1;
+    let second_ts = base_ts + gap * u64::from(interval);
+    enc.append(second_ts, 20).unwrap();
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].ts, base_ts);
+    assert_eq!(decoded[0].value, 10);
+    assert_eq!(decoded[1].ts, second_ts);
+    assert_eq!(decoded[1].value, 20);
+}

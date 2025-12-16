@@ -66,23 +66,21 @@ pub fn rounded_avg(sum: i32, count: u16) -> i32 {
     }
 }
 
-/// Pack pending averaging state into `pending_state` (u64)
-/// - Bits 0-5: actual bit accumulator count (0-63)
-/// - Bits 6-15: `pending_count` (0-1023)
-/// - Bits 16-47: `pending_sum` as i32 (32 bits, stored as u32)
+/// Pack pending averaging state (count and sum only)
+/// - Bits 0-9: `pending_count` (0-1023)
+/// - Bits 10-41: `pending_sum` as i32 (32 bits, stored as u32)
 #[inline]
-pub fn pack_pending(bits: u32, count: u16, sum: i32) -> u64 {
-    (u64::from(sum as u32) << 16) | ((u64::from(count) & 0x3FF) << 6) | (u64::from(bits) & 0x3F)
+pub const fn pack_avg(count: u16, sum: i32) -> u64 {
+    ((sum as u32 as u64) << 10) | ((count as u64) & 0x3FF)
 }
 
-/// Unpack pending averaging state from `pending_state`
-/// Returns (`bit_accum_count`, `pending_count`, `pending_sum`)
+/// Unpack pending averaging state
+/// Returns (`pending_count`, `pending_sum`)
 #[inline]
-pub const fn unpack_pending(packed: u64) -> (u32, u16, i32) {
-    let bits = (packed & 0x3F) as u32;
-    let count = ((packed >> 6) & 0x3FF) as u16;
-    let sum = (packed >> 16) as u32 as i32;
-    (bits, count, sum)
+pub const fn unpack_avg(packed: u64) -> (u16, i32) {
+    let count = (packed & 0x3FF) as u16;
+    let sum = (packed >> 10) as u32 as i32;
+    (count, sum)
 }
 
 /// Encode a zero run, returning (bits, `num_bits`, consumed)
