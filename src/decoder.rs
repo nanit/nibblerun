@@ -5,25 +5,30 @@ use crate::reading::Reading;
 use crate::value::Value;
 
 /// Push multiple readings with the same value (zero-run decoding)
+/// Optimized to avoid per-iteration bounds checks and use running timestamp
 #[inline]
 fn push_zero_run<V: Value>(
     decoded: &mut Vec<Reading<V>>,
     count: usize,
-    start_ts: u64,
     interval: u64,
     temp: V,
-    idx: &mut u64,
+    ts: &mut u64,
     run_len: u32,
 ) {
-    for _ in 0..run_len {
-        if decoded.len() >= count {
-            break;
-        }
+    // Calculate how many we can actually push
+    let remaining = count.saturating_sub(decoded.len());
+    let actual_len = (run_len as usize).min(remaining);
+
+    // Reserve capacity once
+    decoded.reserve(actual_len);
+
+    // Push without per-iteration capacity checks
+    for _ in 0..actual_len {
         decoded.push(Reading {
-            ts: start_ts + *idx * interval,
+            ts: *ts,
             value: temp,
         });
-        *idx += 1;
+        *ts += interval;
     }
 }
 
@@ -71,9 +76,10 @@ pub fn decode<V: Value>(bytes: &[u8], interval: u64) -> Vec<Reading<V>> {
 
     let mut reader = BitReader::new(&bytes[header_size..]);
     let mut prev_temp = first_temp.to_i32();
-    let mut idx = 1u64;
+    // Use running timestamp to avoid multiplication on every iteration
+    let mut ts = start_ts + interval;
 
-    // New encoding scheme:
+    // Encoding scheme:
     // 0       = zero delta
     // 100     = +1, 101 = -1
     // 110     = single-interval gap
@@ -85,28 +91,28 @@ pub fn decode<V: Value>(bytes: &[u8], interval: u64) -> Vec<Reading<V>> {
     // 11111111xxxxxx = gap 2-65
     while decoded.len() < count && reader.has_more() {
         if reader.read_bits(1) == 0 {
-            // 0 = zero delta
+            // 0 = zero delta (most common case - ~89% of data)
             decoded.push(Reading {
-                ts: start_ts + idx * interval,
+                ts,
                 value: V::from_i32(prev_temp),
             });
-            idx += 1;
+            ts += interval;
             continue;
         }
         if reader.read_bits(1) == 0 {
             // 10x = ±1 delta
             prev_temp = prev_temp.wrapping_add(if reader.read_bits(1) == 0 { 1 } else { -1 });
             decoded.push(Reading {
-                ts: start_ts + idx * interval,
+                ts,
                 value: V::from_i32(prev_temp),
             });
-            idx += 1;
+            ts += interval;
             continue;
         }
         // 11...
         if reader.read_bits(1) == 0 {
             // 110 = single-interval gap
-            idx += 1;
+            ts += interval;
             continue;
         }
         // 111...
@@ -114,22 +120,22 @@ pub fn decode<V: Value>(bytes: &[u8], interval: u64) -> Vec<Reading<V>> {
             // 1110x = ±2 delta
             prev_temp = prev_temp.wrapping_add(if reader.read_bits(1) == 0 { 2 } else { -2 });
             decoded.push(Reading {
-                ts: start_ts + idx * interval,
+                ts,
                 value: V::from_i32(prev_temp),
             });
-            idx += 1;
+            ts += interval;
             continue;
         }
         // 1111...
         if reader.read_bits(1) == 0 {
             // 11110xxxx = zero run 8-21
-            push_zero_run(&mut decoded, count, start_ts, interval, V::from_i32(prev_temp), &mut idx, reader.read_bits(4) + 8);
+            push_zero_run(&mut decoded, count, interval, V::from_i32(prev_temp), &mut ts, reader.read_bits(4) + 8);
             continue;
         }
         // 11111...
         if reader.read_bits(1) == 0 {
             // 111110xxxxxxx = zero run 22-149
-            push_zero_run(&mut decoded, count, start_ts, interval, V::from_i32(prev_temp), &mut idx, reader.read_bits(7) + 22);
+            push_zero_run(&mut decoded, count, interval, V::from_i32(prev_temp), &mut ts, reader.read_bits(7) + 22);
             continue;
         }
         // 111111...
@@ -138,10 +144,10 @@ pub fn decode<V: Value>(bytes: &[u8], interval: u64) -> Vec<Reading<V>> {
             let e = reader.read_bits(4) as i32;
             prev_temp = prev_temp.wrapping_add(if e < 8 { e - 10 } else { e - 5 });
             decoded.push(Reading {
-                ts: start_ts + idx * interval,
+                ts,
                 value: V::from_i32(prev_temp),
             });
-            idx += 1;
+            ts += interval;
             continue;
         }
         // 1111111...
@@ -155,13 +161,14 @@ pub fn decode<V: Value>(bytes: &[u8], interval: u64) -> Vec<Reading<V>> {
             };
             prev_temp = prev_temp.wrapping_add(delta);
             decoded.push(Reading {
-                ts: start_ts + idx * interval,
+                ts,
                 value: V::from_i32(prev_temp),
             });
-            idx += 1;
+            ts += interval;
         } else {
             // 11111111xxxxxx = gap 2-65 intervals
-            idx += u64::from(reader.read_bits(6) + 2);
+            let gap = u64::from(reader.read_bits(6) + 2);
+            ts += gap * interval;
         }
     }
     decoded
