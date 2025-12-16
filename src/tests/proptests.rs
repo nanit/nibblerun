@@ -359,4 +359,43 @@ proptest! {
             "Expected {} unique intervals, got {} decoded readings. timestamps={:?}, base_offset={}, interval={}",
             unique_intervals.len(), decoded.len(), sorted_timestamps, base_offset, interval);
     }
+
+    /// Property: with gaps between intervals and one reading per interval, values are preserved exactly
+    /// This combines gap preservation with exact value verification
+    #[test]
+    fn prop_lossless_with_gaps(
+        interval in prop::sample::select(vec![60u16, 300, 600]),
+        interval_indices in prop::collection::btree_set(0u64..100, 1..30),
+        temps in prop::collection::vec(-100i32..140, 30),
+    ) {
+        let indices: Vec<u64> = interval_indices.into_iter().collect();
+        if indices.is_empty() {
+            return Ok(());
+        }
+
+        let mut enc = Encoder::with_interval(interval);
+        let mut expected: Vec<(u64, i32)> = Vec::new();
+
+        // Add one reading per selected interval with varying temps
+        for (i, &idx) in indices.iter().enumerate() {
+            let ts = BASE_TS + idx * (interval as u64);
+            let temp = temps[i % temps.len()];
+            if enc.append(ts, temp).is_ok() {
+                expected.push((ts, temp));
+            }
+        }
+
+        let decoded = enc.decode();
+        prop_assert_eq!(decoded.len(), expected.len(),
+            "Expected {} readings, got {}", expected.len(), decoded.len());
+
+        // Verify both timestamps AND values are exact
+        for (reading, &(expected_ts, expected_temp)) in decoded.iter().zip(expected.iter()) {
+            prop_assert_eq!(reading.ts, expected_ts,
+                "Timestamp mismatch: expected {}, got {}", expected_ts, reading.ts);
+            prop_assert_eq!(reading.value, expected_temp,
+                "Value mismatch at ts {}: expected {}, got {}",
+                expected_ts, expected_temp, reading.value);
+        }
+    }
 }

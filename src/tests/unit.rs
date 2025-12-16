@@ -1579,3 +1579,88 @@ fn test_count_at_max_u16() {
 
     assert_eq!(enc.count(), 65535);
 }
+
+// ============================================================================
+// Coverage tests - these tests exist to achieve 100% code coverage
+// ============================================================================
+
+#[test]
+fn test_error_display_formatting() {
+    // TimestampBeforeBase
+    let err = AppendError::TimestampBeforeBase { ts: 100, base_ts: 200 };
+    assert!(err.to_string().contains("100"));
+    assert!(err.to_string().contains("200"));
+
+    // OutOfOrder
+    let err = AppendError::OutOfOrder { ts: 300, logical_idx: 1, prev_logical_idx: 2 };
+    assert!(err.to_string().contains("interval"));
+
+    // IntervalOverflow
+    let err = AppendError::IntervalOverflow { count: 1023 };
+    assert!(err.to_string().contains("1023"));
+
+    // CountOverflow
+    let err = AppendError::CountOverflow;
+    assert!(err.to_string().contains("65535"));
+
+    // DeltaOverflow
+    let err = AppendError::DeltaOverflow { delta: 2000, prev_value: 0, new_value: 2000 };
+    assert!(err.to_string().contains("2000"));
+}
+
+#[test]
+fn test_error_trait_impl() {
+    use std::error::Error;
+    let err: &dyn Error = &AppendError::CountOverflow;
+    assert!(err.source().is_none());
+}
+
+#[test]
+fn test_encoder_new_default_interval() {
+    let enc = Encoder::new();
+    assert_eq!(enc.interval(), 300);
+}
+
+#[test]
+fn test_encoder_default_trait() {
+    let enc = Encoder::default();
+    assert_eq!(enc.interval(), 300);
+}
+
+#[test]
+fn test_interval_getter() {
+    let enc = Encoder::with_interval(600);
+    assert_eq!(enc.interval(), 600);
+}
+
+#[test]
+fn test_zero_run_decode_tier_6_to_21() {
+    // 15 consecutive same-value readings hits the 6-21 tier decoder path
+    let mut enc = Encoder::with_interval(300);
+    let base_ts = 1_760_000_000u64;
+
+    enc.append(base_ts, 25).unwrap();
+    for i in 1..=15 {
+        enc.append(base_ts + i * 300, 25).unwrap();
+    }
+
+    let bytes = enc.to_bytes();
+    let decoded = decode(&bytes);
+    assert_eq!(decoded.len(), 16);
+}
+
+#[test]
+fn test_zero_run_decode_tier_22_to_149() {
+    // 50 consecutive same-value readings hits the 22-149 tier decoder path
+    let mut enc = Encoder::with_interval(300);
+    let base_ts = 1_760_000_000u64;
+
+    enc.append(base_ts, 25).unwrap();
+    for i in 1..=50 {
+        enc.append(base_ts + i * 300, 25).unwrap();
+    }
+
+    let bytes = enc.to_bytes();
+    let decoded = decode(&bytes);
+    assert_eq!(decoded.len(), 51);
+}
