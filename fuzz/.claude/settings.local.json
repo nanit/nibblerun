@@ -18,7 +18,9 @@
       "Bash(cargo bench:*)",
       "Bash(./target/release/nbl-viz:*)",
       "Bash(./target/release/nbl-gen:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(wc:*)",
+      "Bash(./target/release/nbl-analyze:*)"
     ],
     "deny": [],
     "ask": []

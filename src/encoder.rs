@@ -217,12 +217,13 @@ impl Encoder {
             }
         }
         // Large delta: must fit in 11-bit signed range [-1024, 1023]
+        // New encoding: 11111110 (8-bit prefix) + 11-bit signed value = 19 bits
         assert!(
             (-1024..=1023).contains(&delta),
             "Delta {delta} out of range [-1024, 1023]. Temperature swings this large are not supported."
         );
-        let bits = (0b111_1110_u32 << 11) | ((delta as u32) & 0x7FF);
-        self.write_bits(bits, 18);
+        let bits = (0b1111_1110_u32 << 11) | ((delta as u32) & 0x7FF);
+        self.write_bits(bits, 19);
     }
 
     /// Get the encoded size in bytes
@@ -276,16 +277,16 @@ impl Encoder {
                 return u32::from(num_bits);
             }
         }
-        18 // Large delta encoding
+        19 // Large delta encoding (11111110 + 11 bits)
     }
 
     /// Calculate the number of bits needed to encode a zero run
     ///
     /// Must match the logic in `encode_zero_run`:
     /// - n <= 7: individual zeros (1 bit each)
-    /// - n 8-21: 8-bit run encoding
-    /// - n 22-149: 12-bit run encoding
-    /// - n 150+: multiple 12-bit encodings
+    /// - n 8-21: 9-bit run encoding (prefix 11110 + 4-bit length)
+    /// - n 22-149: 13-bit run encoding (prefix 111110 + 7-bit length)
+    /// - n 150+: multiple 13-bit encodings
     #[inline]
     fn zero_run_bits(mut n: u32) -> u32 {
         let mut bits = 0;
@@ -295,13 +296,13 @@ impl Encoder {
                 bits += n;
                 n = 0;
             } else if n <= 21 {
-                bits += 8;
+                bits += 9;
                 n = 0;
             } else if n <= 149 {
-                bits += 12;
+                bits += 13;
                 n = 0;
             } else {
-                bits += 12;
+                bits += 13;
                 n -= 149;
             }
         }
@@ -408,8 +409,19 @@ impl Encoder {
         let count = self.count as usize;
 
         let interval = u64::from(self.interval);
+        // New encoding scheme:
+        // 0       = zero delta
+        // 100     = +1, 101 = -1
+        // 110     = single-interval gap
+        // 11100   = +2, 11101 = -2
+        // 11110xxxx = zero run 8-21
+        // 111110xxxxxxx = zero run 22-149
+        // 1111110xxxx = ±3-10 delta
+        // 11111110xxxxxxxxxxx = large delta
+        // 11111111xxxxxx = gap 2-65
         while decoded.len() < count && reader.has_more() {
             if reader.read_bits(1) == 0 {
+                // 0 = zero delta
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
                     value: prev_temp,
@@ -418,6 +430,7 @@ impl Encoder {
                 continue;
             }
             if reader.read_bits(1) == 0 {
+                // 10x = ±1 delta
                 prev_temp += if reader.read_bits(1) == 0 { 1 } else { -1 };
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
@@ -426,8 +439,15 @@ impl Encoder {
                 idx += 1;
                 continue;
             }
-            // ±2: 110 + sign (4 bits total)
+            // 11...
             if reader.read_bits(1) == 0 {
+                // 110 = single-interval gap
+                idx += 1;
+                continue;
+            }
+            // 111...
+            if reader.read_bits(1) == 0 {
+                // 1110x = ±2 delta
                 prev_temp += if reader.read_bits(1) == 0 { 2 } else { -2 };
                 decoded.push(Reading {
                     ts: self.base_ts + idx * interval,
@@ -436,8 +456,9 @@ impl Encoder {
                 idx += 1;
                 continue;
             }
+            // 1111...
             if reader.read_bits(1) == 0 {
-                // 8-21 run: 1110 + 4 bits
+                // 11110xxxx = zero run 8-21
                 for _ in 0..reader.read_bits(4) + 8 {
                     if decoded.len() >= count {
                         break;
@@ -450,8 +471,9 @@ impl Encoder {
                 }
                 continue;
             }
+            // 11111...
             if reader.read_bits(1) == 0 {
-                // 22-149 run: 11110 + 7 bits
+                // 111110xxxxxxx = zero run 22-149
                 for _ in 0..reader.read_bits(7) + 22 {
                     if decoded.len() >= count {
                         break;
@@ -464,8 +486,9 @@ impl Encoder {
                 }
                 continue;
             }
+            // 111111...
             if reader.read_bits(1) == 0 {
-                // ±3-10: 111110 + 4 bits
+                // 1111110xxxx = ±3-10 delta
                 let e = reader.read_bits(4) as i32;
                 prev_temp += if e < 8 { e - 10 } else { e - 5 };
                 decoded.push(Reading {
@@ -475,7 +498,9 @@ impl Encoder {
                 idx += 1;
                 continue;
             }
+            // 1111111...
             if reader.read_bits(1) == 0 {
+                // 11111110xxxxxxxxxxx = large delta (±11-1023)
                 let raw = reader.read_bits(11);
                 prev_temp += if raw & 0x400 != 0 {
                     (raw | 0xFFFF_F800) as i32
@@ -488,7 +513,8 @@ impl Encoder {
                 });
                 idx += 1;
             } else {
-                idx += u64::from(reader.read_bits(6) + 1);
+                // 11111111xxxxxx = gap 2-65 intervals
+                idx += u64::from(reader.read_bits(6) + 2);
             }
         }
 
@@ -522,7 +548,9 @@ impl Encoder {
         let mut result = Vec::with_capacity(HEADER_SIZE + self.data.len() + 4);
 
         // Header
-        let base_ts_offset = (self.base_ts - EPOCH_BASE) as u32;
+        // Use wrapping_sub for consistent behavior in debug/release modes
+        // Note: timestamps before EPOCH_BASE will produce incorrect data
+        let base_ts_offset = self.base_ts.wrapping_sub(EPOCH_BASE) as u32;
         result.extend_from_slice(&base_ts_offset.to_le_bytes());
         let duration = div_by_interval(self.last_ts - self.base_ts, self.interval) as u16;
         result.extend_from_slice(&duration.to_le_bytes());
@@ -599,9 +627,10 @@ impl Encoder {
             }
         }
         // Large delta: clamp to 11-bit signed range
+        // New encoding: 11111110 (8-bit prefix) + 11-bit signed value = 19 bits
         let clamped = delta.clamp(-1024, 1023);
-        let bits = (0b111_1110_u32 << 11) | ((clamped as u32) & 0x7FF);
-        (bits, 18)
+        let bits = (0b1111_1110_u32 << 11) | ((clamped as u32) & 0x7FF);
+        (bits, 19)
     }
 
     #[inline]
@@ -633,10 +662,21 @@ impl Encoder {
 
     #[inline]
     fn write_gaps(&mut self, mut count: u32) {
+        // New encoding:
+        // - Single gap (1 interval): 110 (3 bits)
+        // - Multi gap (2-65 intervals): 11111111xxxxxx (14 bits, 6-bit count for 2-65)
         while count > 0 {
-            let g = count.min(64);
-            self.write_bits((0x7F << 6) | (g - 1), 13);
-            count -= g;
+            if count == 1 {
+                // Single-interval gap: 110 (3 bits)
+                self.write_bits(0b110, 3);
+                count = 0;
+            } else {
+                // Multi-interval gap: 2-65 intervals
+                // Encoding: 11111111 (8-bit prefix) + 6-bit value (0-63 maps to 2-65)
+                let g = count.min(65);
+                self.write_bits((0xFF << 6) | (g - 2), 14);
+                count -= g;
+            }
         }
     }
 }

@@ -1771,7 +1771,7 @@ fn test_zero_run_decode_tier_22_to_149() {
 fn test_zero_run_encoding_structure() {
     let base_ts = 1761955455u64;
     let mut enc = Encoder::new();
-    
+
     // Create sequence: val=15, val=12 (delta -3), then 16x val=12 (16 zeros), val=5 (delta -7)
     enc.append(base_ts, 15).unwrap();
     enc.append(base_ts + 300, 12).unwrap();
@@ -1779,10 +1779,10 @@ fn test_zero_run_encoding_structure() {
         enc.append(base_ts + i * 300, 12).unwrap();
     }
     enc.append(base_ts + 18 * 300, 5).unwrap();
-    
+
     let bytes = enc.to_bytes();
     let data = &bytes[14..]; // Skip header
-    
+
     // Decode the encoding to find if we have a 16-run or 15-run + single zero
     let mut pos: usize = 0;
     let read_bits = |data: &[u8], pos: &mut usize, n: usize| -> u32 {
@@ -1798,21 +1798,435 @@ fn test_zero_run_encoding_structure() {
         }
         result
     };
-    
-    // Skip reading 1's delta (-3: 10 bits)
-    pos = 10;
-    
-    // Now we should see the zero run - check if it starts with 1110 (8-21 run)
-    let prefix = read_bits(data, &mut pos, 4);
-    assert_eq!(prefix, 0b1110, "Expected 8-21 run prefix (1110)");
-    
+
+    // Skip reading 1's delta (-3: 11 bits with new encoding: 1111110xxxx)
+    pos = 11;
+
+    // Now we should see the zero run - check if it starts with 11110 (8-21 run)
+    let prefix = read_bits(data, &mut pos, 5);
+    assert_eq!(prefix, 0b11110, "Expected 8-21 run prefix (11110)");
+
     let run_len_encoded = read_bits(data, &mut pos, 4);
     let run_len = run_len_encoded + 8;
-    
+
     // The run should be 16, not 15
     assert_eq!(
         run_len, 16,
         "Expected 16-run, got {}-run. Bug: zeros are being split!",
         run_len
     );
+}
+
+// ============================================================================
+// Encoding structure tests - verify actual bit patterns
+// ============================================================================
+
+/// Helper function to read bits from a byte slice (MSB first within each byte)
+fn read_bits_from(data: &[u8], pos: &mut usize, n: usize) -> u32 {
+    let mut result = 0u32;
+    for _ in 0..n {
+        let byte_idx = *pos / 8;
+        let bit_idx = 7 - (*pos % 8);
+        if byte_idx < data.len() {
+            let bit = (data[byte_idx] >> bit_idx) & 1;
+            result = (result << 1) | u32::from(bit);
+        }
+        *pos += 1;
+    }
+    result
+}
+
+/// Test single-interval gap encoding (110) - 3 bits
+/// This is the optimized encoding for single gaps which are 99.4% of all gaps
+#[test]
+fn test_single_gap_encoding() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    // Create a sequence with a single-interval gap:
+    // Reading at interval 0, skip interval 1, reading at interval 2
+    enc.append(base_ts, 22).unwrap();           // interval 0
+    enc.append(base_ts + 600, 22).unwrap();     // interval 2 (skip interval 1 = 1 gap)
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].ts, base_ts);
+    assert_eq!(decoded[1].ts, base_ts + 600);
+    assert_eq!(decoded[1].ts - decoded[0].ts, 600); // 2 intervals = 600 seconds
+
+    // Verify the bit encoding
+    let bytes = enc.to_bytes();
+    let data = &bytes[14..]; // Skip 14-byte header
+
+    let mut pos = 0;
+    // First we should see: single gap (110) + zero delta (0)
+    // Single gap: 110 (3 bits)
+    let gap_prefix = read_bits_from(data, &mut pos, 3);
+    assert_eq!(gap_prefix, 0b110, "Expected single-gap prefix 110, got {:03b}", gap_prefix);
+
+    // Zero delta after gap: 0 (1 bit)
+    let zero_delta = read_bits_from(data, &mut pos, 1);
+    assert_eq!(zero_delta, 0, "Expected zero delta after gap");
+}
+
+/// Test single-interval gap with non-zero delta following
+#[test]
+fn test_single_gap_with_delta() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    // Single gap followed by +1 delta
+    enc.append(base_ts, 22).unwrap();           // interval 0
+    enc.append(base_ts + 600, 23).unwrap();     // interval 2, temp +1
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].value, 22);
+    assert_eq!(decoded[1].value, 23);
+
+    let bytes = enc.to_bytes();
+    let data = &bytes[14..];
+
+    let mut pos = 0;
+    // Single gap: 110 (3 bits)
+    let gap_prefix = read_bits_from(data, &mut pos, 3);
+    assert_eq!(gap_prefix, 0b110, "Expected single-gap prefix 110");
+
+    // +1 delta: 100 (3 bits)
+    let delta_bits = read_bits_from(data, &mut pos, 3);
+    assert_eq!(delta_bits, 0b100, "Expected +1 delta encoding 100, got {:03b}", delta_bits);
+}
+
+/// Test multiple consecutive single-interval gaps
+#[test]
+fn test_multiple_single_gaps() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    // Three readings, each separated by a single-interval gap
+    enc.append(base_ts, 22).unwrap();            // interval 0
+    enc.append(base_ts + 600, 22).unwrap();      // interval 2 (gap of 1)
+    enc.append(base_ts + 1200, 22).unwrap();     // interval 4 (gap of 1)
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 3);
+
+    let bytes = enc.to_bytes();
+    let data = &bytes[14..];
+
+    let mut pos = 0;
+
+    // First gap + zero delta: 110 + 0 = 4 bits
+    assert_eq!(read_bits_from(data, &mut pos, 3), 0b110, "First single-gap");
+    assert_eq!(read_bits_from(data, &mut pos, 1), 0, "Zero delta after first gap");
+
+    // Second gap + zero delta: 110 + 0 = 4 bits
+    assert_eq!(read_bits_from(data, &mut pos, 3), 0b110, "Second single-gap");
+    assert_eq!(read_bits_from(data, &mut pos, 1), 0, "Zero delta after second gap");
+}
+
+/// Test that 2-interval gap uses the 14-bit encoding, not single-gap
+#[test]
+fn test_two_interval_gap_encoding() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    // 2-interval gap (skip intervals 1 and 2)
+    enc.append(base_ts, 22).unwrap();           // interval 0
+    enc.append(base_ts + 900, 22).unwrap();     // interval 3 (gap of 2)
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[1].ts - decoded[0].ts, 900);
+
+    let bytes = enc.to_bytes();
+    let data = &bytes[14..];
+
+    let mut pos = 0;
+    // Multi-gap prefix: 11111111 (8 bits)
+    let gap_prefix = read_bits_from(data, &mut pos, 8);
+    assert_eq!(gap_prefix, 0b11111111, "Expected multi-gap prefix 11111111");
+
+    // Gap count: 6 bits encoding (value 0 = 2 gaps)
+    let gap_count = read_bits_from(data, &mut pos, 6);
+    assert_eq!(gap_count, 0, "Expected gap count 0 (meaning 2 intervals)");
+}
+
+/// Test ±2 delta encoding (5 bits: 11100 for +2, 11101 for -2)
+#[test]
+fn test_plus_two_delta_encoding() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    enc.append(base_ts, 20).unwrap();
+    enc.append(base_ts + 300, 22).unwrap();  // +2 delta
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].value, 20);
+    assert_eq!(decoded[1].value, 22);
+
+    let bytes = enc.to_bytes();
+    let data = &bytes[14..];
+
+    let mut pos = 0;
+    // +2 delta: 11100 (5 bits)
+    let delta_bits = read_bits_from(data, &mut pos, 5);
+    assert_eq!(delta_bits, 0b11100, "Expected +2 delta encoding 11100, got {:05b}", delta_bits);
+}
+
+/// Test -2 delta encoding
+#[test]
+fn test_minus_two_delta_encoding() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    enc.append(base_ts, 22).unwrap();
+    enc.append(base_ts + 300, 20).unwrap();  // -2 delta
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].value, 22);
+    assert_eq!(decoded[1].value, 20);
+
+    let bytes = enc.to_bytes();
+    let data = &bytes[14..];
+
+    let mut pos = 0;
+    // -2 delta: 11101 (5 bits)
+    let delta_bits = read_bits_from(data, &mut pos, 5);
+    assert_eq!(delta_bits, 0b11101, "Expected -2 delta encoding 11101, got {:05b}", delta_bits);
+}
+
+/// Test sequence with multiple ±2 deltas
+#[test]
+fn test_multiple_two_deltas() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    // Sequence: 20 -> 22 -> 20 -> 22 (alternating +2, -2)
+    enc.append(base_ts, 20).unwrap();
+    enc.append(base_ts + 300, 22).unwrap();   // +2
+    enc.append(base_ts + 600, 20).unwrap();   // -2
+    enc.append(base_ts + 900, 22).unwrap();   // +2
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 4);
+    assert_eq!(decoded.iter().map(|r| r.value).collect::<Vec<_>>(), vec![20, 22, 20, 22]);
+
+    let bytes = enc.to_bytes();
+    let data = &bytes[14..];
+
+    let mut pos = 0;
+    // +2: 11100
+    assert_eq!(read_bits_from(data, &mut pos, 5), 0b11100, "First +2");
+    // -2: 11101
+    assert_eq!(read_bits_from(data, &mut pos, 5), 0b11101, "First -2");
+    // +2: 11100
+    assert_eq!(read_bits_from(data, &mut pos, 5), 0b11100, "Second +2");
+}
+
+/// Test zero run 150+ split into multiple encodings
+/// 150 zeros should be encoded as: 149-run (13 bits) + 1 single zero (1 bit)
+#[test]
+fn test_zero_run_150_split_encoding() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    // First reading, then 150 same-value readings (150 zero deltas), then different value
+    enc.append(base_ts, 22).unwrap();
+    for i in 1..=150 {
+        enc.append(base_ts + i * 300, 22).unwrap();
+    }
+    enc.append(base_ts + 151 * 300, 23).unwrap();  // +1 to flush
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 152);
+
+    let bytes = enc.to_bytes();
+    let data = &bytes[14..];
+
+    let mut pos = 0;
+
+    // First: 22-149 run prefix (111110) + 7 bits for count
+    // 149 zeros: prefix 111110, count = 149 - 22 = 127
+    let prefix1 = read_bits_from(data, &mut pos, 6);
+    assert_eq!(prefix1, 0b111110, "Expected 22-149 run prefix 111110");
+    let count1 = read_bits_from(data, &mut pos, 7);
+    assert_eq!(count1, 127, "Expected count 127 (149 zeros)");
+
+    // Second: 1 single zero (bit 0)
+    let single_zero = read_bits_from(data, &mut pos, 1);
+    assert_eq!(single_zero, 0, "Expected single zero bit");
+
+    // Finally: +1 delta (100)
+    let delta = read_bits_from(data, &mut pos, 3);
+    assert_eq!(delta, 0b100, "Expected +1 delta");
+}
+
+/// Test zero run 300 (splits into 149 + 149 + 2 individual zeros)
+#[test]
+fn test_zero_run_300_split_encoding() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    enc.append(base_ts, 22).unwrap();
+    for i in 1..=300 {
+        enc.append(base_ts + i * 300, 22).unwrap();
+    }
+    enc.append(base_ts + 301 * 300, 23).unwrap();  // +1 to flush
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 302);
+
+    let bytes = enc.to_bytes();
+    let data = &bytes[14..];
+
+    let mut pos = 0;
+
+    // First 149-run: 111110 + 127
+    assert_eq!(read_bits_from(data, &mut pos, 6), 0b111110, "First 149-run prefix");
+    assert_eq!(read_bits_from(data, &mut pos, 7), 127, "First count = 127 (149 zeros)");
+
+    // Second 149-run: 111110 + 127
+    assert_eq!(read_bits_from(data, &mut pos, 6), 0b111110, "Second 149-run prefix");
+    assert_eq!(read_bits_from(data, &mut pos, 7), 127, "Second count = 127 (149 zeros)");
+
+    // Remaining 2 zeros as individual bits
+    assert_eq!(read_bits_from(data, &mut pos, 1), 0, "First individual zero");
+    assert_eq!(read_bits_from(data, &mut pos, 1), 0, "Second individual zero");
+
+    // +1 delta
+    assert_eq!(read_bits_from(data, &mut pos, 3), 0b100, "Final +1 delta");
+}
+
+/// Test gap 65 intervals fits in single 14-bit marker (max for 2-65 range)
+#[test]
+fn test_gap_65_single_marker() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    // Skip 65 intervals - this is the max that fits in a single 14-bit marker
+    // (6 bits encodes 0-63, representing gaps 2-65)
+    enc.append(base_ts, 22).unwrap();
+    enc.append(base_ts + 66 * 300, 22).unwrap();  // 66 intervals later = gap of 65
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[1].ts - decoded[0].ts, 66 * 300);
+
+    let bytes = enc.to_bytes();
+    let data = &bytes[14..];
+
+    let mut pos = 0;
+
+    // Gap encoding: 11111111 + 6 bits
+    // 6 bits = 63 means 65 gaps (since count + 2 = gaps)
+    let prefix = read_bits_from(data, &mut pos, 8);
+    assert_eq!(prefix, 0b11111111, "Gap prefix");
+    let count = read_bits_from(data, &mut pos, 6);
+    assert_eq!(count, 63, "Gap count 63 (meaning 65 intervals)");
+
+    // Zero delta: 0
+    let delta = read_bits_from(data, &mut pos, 1);
+    assert_eq!(delta, 0, "Zero delta after gap");
+}
+
+/// Test gap 66 intervals (requires split: 65 + 1 single gap)
+#[test]
+fn test_gap_66_split_encoding() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    // Skip 66 intervals - exceeds single marker capacity (2-65)
+    // Should split into: 65 gaps (14-bit) + 1 gap (3-bit single)
+    enc.append(base_ts, 22).unwrap();
+    enc.append(base_ts + 67 * 300, 22).unwrap();  // 67 intervals later = gap of 66
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[1].ts - decoded[0].ts, 67 * 300);
+
+    let bytes = enc.to_bytes();
+    let data = &bytes[14..];
+
+    let mut pos = 0;
+
+    // First: 65-gap marker (11111111 + 63)
+    let prefix1 = read_bits_from(data, &mut pos, 8);
+    assert_eq!(prefix1, 0b11111111, "First gap prefix");
+    let count1 = read_bits_from(data, &mut pos, 6);
+    assert_eq!(count1, 63, "Gap count 63 (meaning 65 intervals)");
+
+    // Second: single gap (110) for remaining 1 interval
+    let single_gap = read_bits_from(data, &mut pos, 3);
+    assert_eq!(single_gap, 0b110, "Single gap for remaining 1 interval");
+
+    // Zero delta: 0
+    let delta = read_bits_from(data, &mut pos, 1);
+    assert_eq!(delta, 0, "Zero delta after gaps");
+}
+
+/// Test all encoding prefixes in sequence to verify disambiguation
+#[test]
+fn test_all_encoding_prefixes() {
+    let base_ts = 1761955455u64;
+    let mut enc = Encoder::new();
+
+    // Build a sequence that uses all encoding types:
+    // Start: 100
+    enc.append(base_ts, 100).unwrap();
+
+    // 1. Zero delta (0): same temp
+    enc.append(base_ts + 300, 100).unwrap();
+
+    // 2. +1 delta (100): temp 101
+    enc.append(base_ts + 600, 101).unwrap();
+
+    // 3. -1 delta (101): temp 100
+    enc.append(base_ts + 900, 100).unwrap();
+
+    // 4. Single gap (110) + zero delta: skip interval 4, temp same
+    enc.append(base_ts + 1500, 100).unwrap();  // interval 5
+
+    // 5. +2 delta (11100): temp 102
+    enc.append(base_ts + 1800, 102).unwrap();
+
+    // 6. -2 delta (11101): temp 100
+    enc.append(base_ts + 2100, 100).unwrap();
+
+    // 7. +5 delta (1111110 + sign + magnitude): temp 105
+    enc.append(base_ts + 2400, 105).unwrap();
+
+    // 8. +100 delta (11111110 + sign + 10 bits): temp 205
+    enc.append(base_ts + 2700, 205).unwrap();
+
+    // 9. 2-interval gap (11111111 + 6 bits): skip 2
+    enc.append(base_ts + 3600, 205).unwrap();  // interval 12
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 10);
+
+    // Verify values
+    let expected_values = [100, 100, 101, 100, 100, 102, 100, 105, 205, 205];
+    for (i, r) in decoded.iter().enumerate() {
+        assert_eq!(r.value, expected_values[i], "Value mismatch at index {}", i);
+    }
+
+    // Verify timestamps
+    let expected_ts = [
+        base_ts,
+        base_ts + 300,
+        base_ts + 600,
+        base_ts + 900,
+        base_ts + 1500,  // gap
+        base_ts + 1800,
+        base_ts + 2100,
+        base_ts + 2400,
+        base_ts + 2700,
+        base_ts + 3600,  // gap
+    ];
+    for (i, r) in decoded.iter().enumerate() {
+        assert_eq!(r.ts, expected_ts[i], "Timestamp mismatch at index {}", i);
+    }
 }

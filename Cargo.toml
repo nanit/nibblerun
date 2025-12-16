@@ -20,6 +20,10 @@ path = "src/bin/nbl_gen.rs"
 name = "nbl-viz"
 path = "src/bin/nbl_viz.rs"
 
+[[bin]]
+name = "nbl-analyze"
+path = "src/bin/nbl_analyze.rs"
+
 [[bench]]
 name = "benchmarks"
 harness = false

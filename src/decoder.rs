@@ -63,9 +63,19 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
     let mut prev_temp = first_temp;
     let mut idx = 1u64;
 
+    // New encoding scheme:
+    // 0       = zero delta
+    // 100     = +1, 101 = -1
+    // 110     = single-interval gap
+    // 11100   = +2, 11101 = -2
+    // 11110xxxx = zero run 8-21
+    // 111110xxxxxxx = zero run 22-149
+    // 1111110xxxx = ±3-10 delta
+    // 11111110xxxxxxxxxxx = large delta
+    // 11111111xxxxxx = gap 2-65
     while decoded.len() < count && reader.has_more() {
         if reader.read_bits(1) == 0 {
-            // Single zero: 0
+            // 0 = zero delta
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
                 value: prev_temp,
@@ -74,7 +84,7 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             continue;
         }
         if reader.read_bits(1) == 0 {
-            // ±1: 10 + sign
+            // 10x = ±1 delta
             prev_temp = prev_temp.wrapping_add(if reader.read_bits(1) == 0 { 1 } else { -1 });
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
@@ -83,8 +93,15 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             idx += 1;
             continue;
         }
-        // ±2: 110 + sign (4 bits total)
+        // 11...
         if reader.read_bits(1) == 0 {
+            // 110 = single-interval gap
+            idx += 1;
+            continue;
+        }
+        // 111...
+        if reader.read_bits(1) == 0 {
+            // 1110x = ±2 delta
             prev_temp = prev_temp.wrapping_add(if reader.read_bits(1) == 0 { 2 } else { -2 });
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
@@ -93,18 +110,21 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             idx += 1;
             continue;
         }
+        // 1111...
         if reader.read_bits(1) == 0 {
-            // Zero run 8-21: 1110 + 4 bits
+            // 11110xxxx = zero run 8-21
             push_zero_run(&mut decoded, count, start_ts, interval, prev_temp, &mut idx, reader.read_bits(4) + 8);
             continue;
         }
+        // 11111...
         if reader.read_bits(1) == 0 {
-            // Zero run 22-149: 11110 + 7 bits
+            // 111110xxxxxxx = zero run 22-149
             push_zero_run(&mut decoded, count, start_ts, interval, prev_temp, &mut idx, reader.read_bits(7) + 22);
             continue;
         }
+        // 111111...
         if reader.read_bits(1) == 0 {
-            // ±3-10: 111110 + 4 bits
+            // 1111110xxxx = ±3-10 delta
             let e = reader.read_bits(4) as i32;
             prev_temp = prev_temp.wrapping_add(if e < 8 { e - 10 } else { e - 5 });
             decoded.push(Reading {
@@ -114,8 +134,9 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             idx += 1;
             continue;
         }
+        // 1111111...
         if reader.read_bits(1) == 0 {
-            // Large delta: 11111110 + 11 bits signed
+            // 11111110xxxxxxxxxxx = large delta (±11-1023)
             let raw = reader.read_bits(11);
             let delta = if raw & 0x400 != 0 {
                 (raw | 0xFFFF_F800) as i32
@@ -129,8 +150,8 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             });
             idx += 1;
         } else {
-            // Gap marker: 11111111 + 6 bits
-            idx += u64::from(reader.read_bits(6) + 1);
+            // 11111111xxxxxx = gap 2-65 intervals
+            idx += u64::from(reader.read_bits(6) + 2);
         }
     }
     decoded

@@ -60,6 +60,7 @@ enum SpanKind {
     Delta2(i32),
     Delta3_10(i32),
     LargeDelta(i32),
+    SingleGap,
     Gap(u32),
 }
 
@@ -78,6 +79,7 @@ impl SpanKind {
             SpanKind::Delta2(_) => colors::DELTA_2,
             SpanKind::Delta3_10(_) => colors::DELTA_3_10,
             SpanKind::LargeDelta(_) => colors::LARGE_DELTA,
+            SpanKind::SingleGap => colors::GAP,
             SpanKind::Gap(_) => colors::GAP,
         }
     }
@@ -96,6 +98,7 @@ impl SpanKind {
             SpanKind::Delta2(d) => format!("{d:+}"),
             SpanKind::Delta3_10(d) => format!("{d:+}"),
             SpanKind::LargeDelta(d) => format!("{d:+}"),
+            SpanKind::SingleGap => "gap=1".to_string(),
             SpanKind::Gap(n) => format!("gap={n}"),
         }
     }
@@ -222,11 +225,23 @@ fn parse_data(bytes: &[u8], count: usize, start_id: usize) -> Vec<BitSpan> {
 
     let mut readings_decoded = 1; // First reading is in header
 
+    // New encoding scheme:
+    // 0       = zero delta (1 bit)
+    // 100     = +1, 101 = -1 (3 bits)
+    // 110     = single-interval gap (3 bits)
+    // 11100   = +2, 11101 = -2 (5 bits)
+    // 11110xxxx = zero run 8-21 (9 bits)
+    // 111110xxxxxxx = zero run 22-149 (13 bits)
+    // 1111110xxxx = ±3-10 delta (11 bits)
+    // 11111110xxxxxxxxxxx = large delta (19 bits)
+    // 11111111xxxxxx = gap 2-65 (14 bits)
+
     while readings_decoded < count && reader.has_more() {
         let start = reader.pos();
 
         // Read first bit
         if reader.read_bits(1) == 0 {
+            // 0 = zero delta
             spans.push(BitSpan {
                 id,
                 start_bit: header_bits + start,
@@ -240,6 +255,7 @@ fn parse_data(bytes: &[u8], count: usize, start_id: usize) -> Vec<BitSpan> {
 
         // Read second bit
         if reader.read_bits(1) == 0 {
+            // 10x = ±1 delta
             let sign = reader.read_bits(1);
             let delta = if sign == 0 { 1 } else { -1 };
             spans.push(BitSpan {
@@ -253,14 +269,30 @@ fn parse_data(bytes: &[u8], count: usize, start_id: usize) -> Vec<BitSpan> {
             continue;
         }
 
-        // Read third bit - ±2: 110 + sign (4 bits total)
+        // Read third bit
         if reader.read_bits(1) == 0 {
+            // 110 = single-interval gap (3 bits)
+            spans.push(BitSpan {
+                id,
+                start_bit: header_bits + start,
+                length: 3,
+                kind: SpanKind::SingleGap,
+            });
+            id += 1;
+            // Gap doesn't add readings
+            continue;
+        }
+
+        // 111...
+        // Read fourth bit
+        if reader.read_bits(1) == 0 {
+            // 1110x = ±2 delta (5 bits)
             let sign = reader.read_bits(1);
             let delta = if sign == 0 { 2 } else { -2 };
             spans.push(BitSpan {
                 id,
                 start_bit: header_bits + start,
-                length: 4,
+                length: 5,
                 kind: SpanKind::Delta2(delta),
             });
             id += 1;
@@ -268,13 +300,15 @@ fn parse_data(bytes: &[u8], count: usize, start_id: usize) -> Vec<BitSpan> {
             continue;
         }
 
-        // Read fourth bit - 8-21 run
+        // 1111...
+        // Read fifth bit
         if reader.read_bits(1) == 0 {
+            // 11110xxxx = zero run 8-21 (9 bits)
             let n = reader.read_bits(4) + 8;
             spans.push(BitSpan {
                 id,
                 start_bit: header_bits + start,
-                length: 8,
+                length: 9,
                 kind: SpanKind::ZeroRun8_21(n),
             });
             id += 1;
@@ -282,13 +316,15 @@ fn parse_data(bytes: &[u8], count: usize, start_id: usize) -> Vec<BitSpan> {
             continue;
         }
 
-        // Read fifth bit - 22-149 run
+        // 11111...
+        // Read sixth bit
         if reader.read_bits(1) == 0 {
+            // 111110xxxxxxx = zero run 22-149 (13 bits)
             let n = reader.read_bits(7) + 22;
             spans.push(BitSpan {
                 id,
                 start_bit: header_bits + start,
-                length: 12,
+                length: 13,
                 kind: SpanKind::ZeroRun22_149(n),
             });
             id += 1;
@@ -296,14 +332,16 @@ fn parse_data(bytes: &[u8], count: usize, start_id: usize) -> Vec<BitSpan> {
             continue;
         }
 
-        // Read sixth bit - ±3-10
+        // 111111...
+        // Read seventh bit
         if reader.read_bits(1) == 0 {
+            // 1111110xxxx = ±3-10 delta (11 bits)
             let e = reader.read_bits(4) as i32;
             let delta = if e < 8 { e - 10 } else { e - 5 };
             spans.push(BitSpan {
                 id,
                 start_bit: header_bits + start,
-                length: 10,
+                length: 11,
                 kind: SpanKind::Delta3_10(delta),
             });
             id += 1;
@@ -311,8 +349,10 @@ fn parse_data(bytes: &[u8], count: usize, start_id: usize) -> Vec<BitSpan> {
             continue;
         }
 
-        // Read seventh bit - large delta
+        // 1111111...
+        // Read eighth bit
         if reader.read_bits(1) == 0 {
+            // 11111110xxxxxxxxxxx = large delta (19 bits)
             let raw = reader.read_bits(11);
             let delta = if raw & 0x400 != 0 {
                 (raw | 0xFFFF_F800) as i32
@@ -322,17 +362,18 @@ fn parse_data(bytes: &[u8], count: usize, start_id: usize) -> Vec<BitSpan> {
             spans.push(BitSpan {
                 id,
                 start_bit: header_bits + start,
-                length: 18,
+                length: 19,
                 kind: SpanKind::LargeDelta(delta),
             });
             id += 1;
             readings_decoded += 1;
         } else {
-            let n = reader.read_bits(6) + 1;
+            // 11111111xxxxxx = gap 2-65 intervals (14 bits)
+            let n = reader.read_bits(6) + 2;
             spans.push(BitSpan {
                 id,
                 start_bit: header_bits + start,
-                length: 13,
+                length: 14,
                 kind: SpanKind::Gap(n),
             });
             id += 1;
@@ -404,6 +445,13 @@ fn build_rows(
                 event_num += 1;
                 idx += 1;
             }
+            SpanKind::SingleGap => {
+                rows.push(Row {
+                    kind: RowKind::Gap { span_id: span.id },
+                    left_text: "─── gap: 1 interval ───".to_string(),
+                });
+                idx += 1;
+            }
             SpanKind::Gap(n) => {
                 rows.push(Row {
                     kind: RowKind::Gap { span_id: span.id },
@@ -440,7 +488,7 @@ fn get_bits_str(bytes: &[u8], start_bit: usize, length: usize) -> Vec<u8> {
 
 fn render_svg(bytes: &[u8], header_spans: &[BitSpan], data_spans: &[BitSpan], rows: &[Row]) -> String {
     let num_rows = rows.len();
-    let legend_height = 420; // Fixed height for legend
+    let legend_height = 460; // Fixed height for legend (9 encoding types)
     let content_height = MARGIN * 2 + num_rows * ROW_HEIGHT + 40;
     let total_height = content_height.max(legend_height + MARGIN * 2);
     let total_width = LEGEND_X + LEGEND_WIDTH + MARGIN;
@@ -592,7 +640,7 @@ fn render_legend() -> String {
 
     // Legend box background
     legend.push_str(&format!(
-        r#"  <rect x="{}" y="{}" width="{}" height="400" fill="{}" class="legend-box" rx="4"/>
+        r#"  <rect x="{}" y="{}" width="{}" height="440" fill="{}" class="legend-box" rx="4"/>
 "#,
         x - 10, y - 5, LEGEND_WIDTH, bg_color
     ));
@@ -609,7 +657,7 @@ fn render_legend() -> String {
     legend.push_str(&format!(
         r#"  <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="1"/>
 "#,
-        x - 10, MARGIN, x - 10, MARGIN + 400, line_color
+        x - 10, MARGIN, x - 10, MARGIN + 440, line_color
     ));
 
     // Header section
@@ -652,12 +700,13 @@ fn render_legend() -> String {
     let encodings = [
         ("0", "Delta = 0 (unchanged)", "1 bit", colors::ZERO),
         ("10x", "Delta = ±1", "3 bits", colors::DELTA_1),
-        ("110x", "Delta = ±2", "4 bits", colors::DELTA_2),
-        ("1110xxxx", "Run 8-21 zeros", "8 bits", colors::ZERO_RUN_8_21),
-        ("11110xxxxxxx", "Run 22-149 zeros", "12 bits", colors::ZERO_RUN_22_149),
-        ("111110xxxx", "Delta = ±3 to ±10", "10 bits", colors::DELTA_3_10),
-        ("1111110xxxxxxxxxxx", "Delta = ±11 to ±1023", "18 bits", colors::LARGE_DELTA),
-        ("1111111xxxxxx", "Gap (1-64 intervals)", "13 bits", colors::GAP),
+        ("110", "Single-interval gap", "3 bits", colors::GAP),
+        ("1110x", "Delta = ±2", "5 bits", colors::DELTA_2),
+        ("11110xxxx", "Run 8-21 zeros", "9 bits", colors::ZERO_RUN_8_21),
+        ("111110xxxxxxx", "Run 22-149 zeros", "13 bits", colors::ZERO_RUN_22_149),
+        ("1111110xxxx", "Delta = ±3 to ±10", "11 bits", colors::DELTA_3_10),
+        ("11111110xxxxxxxxxxx", "Delta = ±11 to ±1023", "19 bits", colors::LARGE_DELTA),
+        ("11111111xxxxxx", "Gap (2-65 intervals)", "14 bits", colors::GAP),
     ];
 
     for (pattern, desc, bits, color) in encodings {
