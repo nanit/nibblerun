@@ -14,7 +14,8 @@ struct CsvReading {
 }
 
 const EPOCH_BASE: u64 = 1_760_000_000;
-const HEADER_SIZE: usize = 14;
+const HEADER_SIZE: usize = 10;
+const DEFAULT_INTERVAL: u16 = 300;
 
 // Layout constants
 #[allow(dead_code)]
@@ -29,6 +30,11 @@ const LEGEND_X: usize = 860;
 // Ground truth column (when CSV input)
 const GT_X: usize = 660;
 const GT_WIDTH: usize = 300;
+
+// Bitstream view constants
+const BITSTREAM_Y_OFFSET: usize = 40;   // Space above bitstream section
+const BITSTREAM_BIT_SIZE: usize = 12;   // Square bit size (width = height)
+const BITSTREAM_MAX_WIDTH: usize = 192; // 16 bits per row (16 * 12 = 192)
 
 #[derive(Parser)]
 #[command(name = "nbl-viz")]
@@ -60,10 +66,8 @@ mod colors {
 #[derive(Debug, Clone)]
 enum SpanKind {
     HeaderBaseTs(u64),
-    HeaderDuration(u16),
     HeaderCount(u16),
     HeaderFirstValue(i32),
-    HeaderInterval(u16),
     Zero,
     ZeroRun8_21(u32),
     ZeroRun22_149(u32),
@@ -79,10 +83,8 @@ impl SpanKind {
     fn color(&self) -> &'static str {
         match self {
             SpanKind::HeaderBaseTs(_)
-            | SpanKind::HeaderDuration(_)
             | SpanKind::HeaderCount(_)
-            | SpanKind::HeaderFirstValue(_)
-            | SpanKind::HeaderInterval(_) => colors::HEADER,
+            | SpanKind::HeaderFirstValue(_) => colors::HEADER,
             SpanKind::Zero => colors::ZERO,
             SpanKind::ZeroRun8_21(_) => colors::ZERO_RUN_8_21,
             SpanKind::ZeroRun22_149(_) => colors::ZERO_RUN_22_149,
@@ -98,10 +100,8 @@ impl SpanKind {
     fn label(&self) -> String {
         match self {
             SpanKind::HeaderBaseTs(v) => format!("base_ts: {v}"),
-            SpanKind::HeaderDuration(v) => format!("duration: {v}"),
             SpanKind::HeaderCount(v) => format!("count: {v}"),
             SpanKind::HeaderFirstValue(v) => format!("first_val: {v}"),
-            SpanKind::HeaderInterval(v) => format!("interval: {v}s"),
             SpanKind::Zero => "=0".to_string(),
             SpanKind::ZeroRun8_21(n) => format!("run={n}"),
             SpanKind::ZeroRun22_149(n) => format!("run={n}"),
@@ -114,6 +114,60 @@ impl SpanKind {
         }
     }
 
+    /// Generate tooltip text for bitstream view
+    fn tooltip_text(&self, ts: u64, value: i32) -> String {
+        let ts_str = format_timestamp(ts);
+        match self {
+            SpanKind::HeaderBaseTs(v) => format!("base_ts: {} ({})", v, format_timestamp(*v)),
+            SpanKind::HeaderCount(v) => format!("count: {} readings", v),
+            SpanKind::HeaderFirstValue(v) => format!("first_value: {}", v),
+            SpanKind::Zero => format!("{} val={} (=0)", ts_str, value),
+            SpanKind::ZeroRun8_21(n) => format!("{} val={} run={}", ts_str, value, n),
+            SpanKind::ZeroRun22_149(n) => format!("{} val={} run={}", ts_str, value, n),
+            SpanKind::Delta1(d) => format!("{} val={} ({:+})", ts_str, value, d),
+            SpanKind::Delta2(d) => format!("{} val={} ({:+})", ts_str, value, d),
+            SpanKind::Delta3_10(d) => format!("{} val={} ({:+})", ts_str, value, d),
+            SpanKind::LargeDelta(d) => format!("{} val={} ({:+})", ts_str, value, d),
+            SpanKind::SingleGap => "gap: 1 interval".to_string(),
+            SpanKind::Gap(n) => format!("gap: {} intervals", n),
+        }
+    }
+
+    /// Generate expanded decoded readings for hover display
+    /// Returns a list of "timestamp → value" strings
+    fn decoded_readings(&self, start_ts: u64, value: i32, interval: u16) -> Vec<String> {
+        match self {
+            SpanKind::HeaderBaseTs(_)
+            | SpanKind::HeaderCount(_)
+            | SpanKind::HeaderFirstValue(_) => vec![],
+            SpanKind::Zero => {
+                vec![format!("{} → {}", format_timestamp(start_ts), value)]
+            }
+            SpanKind::ZeroRun8_21(n) | SpanKind::ZeroRun22_149(n) => {
+                let mut readings = Vec::new();
+                for i in 0..*n as u64 {
+                    let ts = start_ts + i * interval as u64;
+                    readings.push(format!("{} → {}", format_timestamp(ts), value));
+                }
+                readings
+            }
+            SpanKind::Delta1(d) | SpanKind::Delta2(d) | SpanKind::Delta3_10(d) | SpanKind::LargeDelta(d) => {
+                let new_value = value + d;
+                vec![format!("{} → {}", format_timestamp(start_ts), new_value)]
+            }
+            SpanKind::SingleGap => {
+                vec![format!("{} → (gap)", format_timestamp(start_ts))]
+            }
+            SpanKind::Gap(n) => {
+                let mut readings = Vec::new();
+                for i in 0..*n as u64 {
+                    let ts = start_ts + i * interval as u64;
+                    readings.push(format!("{} → (gap)", format_timestamp(ts)));
+                }
+                readings
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -182,9 +236,14 @@ impl<'a> BitReader<'a> {
     }
 }
 
-fn parse_header(bytes: &[u8]) -> (Vec<BitSpan>, u64, u16, u16, i32, u16) {
+fn parse_header(bytes: &[u8]) -> (Vec<BitSpan>, u64, u16, i32) {
     let mut spans = Vec::new();
     let mut id = 0;
+
+    // Header layout (10 bytes / 80 bits):
+    // [0-3]: base_ts_offset (32 bits)
+    // [4-5]: count (16 bits)
+    // [6-9]: first_value (32 bits)
 
     // base_ts_offset: 4 bytes = 32 bits
     let base_ts_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -197,46 +256,26 @@ fn parse_header(bytes: &[u8]) -> (Vec<BitSpan>, u64, u16, u16, i32, u16) {
     });
     id += 1;
 
-    // duration: 2 bytes = 16 bits
-    let duration = u16::from_le_bytes([bytes[4], bytes[5]]);
+    // count: 2 bytes = 16 bits
+    let count = u16::from_le_bytes([bytes[4], bytes[5]]);
     spans.push(BitSpan {
         id,
         start_bit: 32,
-        length: 16,
-        kind: SpanKind::HeaderDuration(duration),
-    });
-    id += 1;
-
-    // count: 2 bytes = 16 bits
-    let count = u16::from_le_bytes([bytes[6], bytes[7]]);
-    spans.push(BitSpan {
-        id,
-        start_bit: 48,
         length: 16,
         kind: SpanKind::HeaderCount(count),
     });
     id += 1;
 
     // first_value: 4 bytes = 32 bits
-    let first_value = i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    let first_value = i32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
     spans.push(BitSpan {
         id,
-        start_bit: 64,
+        start_bit: 48,
         length: 32,
         kind: SpanKind::HeaderFirstValue(first_value),
     });
-    id += 1;
 
-    // interval: 2 bytes = 16 bits
-    let interval = u16::from_le_bytes([bytes[12], bytes[13]]);
-    spans.push(BitSpan {
-        id,
-        start_bit: 96,
-        length: 16,
-        kind: SpanKind::HeaderInterval(interval),
-    });
-
-    (spans, base_ts, duration, count, first_value, interval)
+    (spans, base_ts, count, first_value)
 }
 
 fn parse_data(bytes: &[u8], count: usize, start_id: usize) -> Vec<BitSpan> {
@@ -645,12 +684,24 @@ fn render_svg(
     rows: &[Row],
     has_ground_truth: bool,
     compression_stats: Option<&CompressionStats>,
+    base_ts: u64,
+    first_value: i32,
+    interval: u16,
 ) -> String {
     let num_rows = rows.len();
     let legend_height = 460; // Fixed height for legend (9 encoding types)
     let stats_height = if compression_stats.is_some() { 60 } else { 0 };
     let content_height = MARGIN * 2 + num_rows * ROW_HEIGHT + 40 + stats_height;
-    let total_height = content_height.max(legend_height + MARGIN * 2 + stats_height);
+
+    // Calculate bitstream section height
+    let total_bits: usize = header_spans.iter().chain(data_spans.iter())
+        .map(|s| s.length).sum();
+    let bits_per_row = BITSTREAM_MAX_WIDTH / BITSTREAM_BIT_SIZE;
+    let bitstream_rows = (total_bits + bits_per_row - 1) / bits_per_row;
+    let bitstream_height = bitstream_rows * BITSTREAM_BIT_SIZE + BITSTREAM_Y_OFFSET + MARGIN;
+
+    let main_content_height = content_height.max(legend_height + MARGIN * 2 + stats_height);
+    let total_height = main_content_height + bitstream_height;
     let legend_x = if has_ground_truth { LEGEND_X + GT_WIDTH } else { LEGEND_X };
     let total_width = legend_x + LEGEND_WIDTH + MARGIN;
 
@@ -678,6 +729,7 @@ fn render_svg(
     .stats-title {{ font-size: 12px; font-weight: bold; fill: #333; }}
     .stats-text {{ font-size: 11px; fill: #333; }}
     .stats-highlight {{ font-size: 13px; font-weight: bold; fill: #1976D2; }}
+    .hover-info-box {{ fill: #FAFAFA; stroke: #ddd; stroke-width: 1; }}
   </style>
   <rect width="100%" height="100%" fill="white"/>
 "#,
@@ -695,6 +747,28 @@ fn render_svg(
       document.querySelectorAll('.span-' + spanId).forEach(el => {
         el.classList.remove('highlight');
       });
+    }
+    function showInfo(encoding, bits, readings) {
+      var container = document.getElementById('hover-info-content');
+      if (!container) return;
+      var html = '<div style="font-size:11px;color:#333;margin-bottom:4px"><b>' + encoding + '</b></div>';
+      html += '<div style="font-size:9px;color:#1976D2;font-family:monospace;margin-bottom:6px">' + bits + '</div>';
+      html += '<div style="font-size:10px;color:#333;line-height:1.4">';
+      var lines = readings.split('|');
+      for (var i = 0; i < lines.length && i < 20; i++) {
+        html += lines[i] + '<br/>';
+      }
+      if (lines.length > 20) {
+        html += '... (' + (lines.length - 20) + ' more)';
+      }
+      html += '</div>';
+      container.innerHTML = html;
+    }
+    function clearInfo() {
+      var container = document.getElementById('hover-info-content');
+      if (container) {
+        container.innerHTML = '<div style="font-size:11px;color:#999">Hover over bits to see decoded values</div>';
+      }
     }
   ]]></script>
 "#);
@@ -859,6 +933,19 @@ fn render_svg(
     // Render encoding rules legend
     svg.push_str(&render_legend(legend_x));
 
+    // Render bitstream view section
+    let bitstream_y_start = main_content_height;
+    let (bitstream_svg, _) = render_bitstream(
+        header_spans,
+        data_spans,
+        bytes,
+        base_ts,
+        first_value,
+        interval,
+        bitstream_y_start,
+    );
+    svg.push_str(&bitstream_svg);
+
     svg.push_str("</svg>\n");
     svg
 }
@@ -894,7 +981,7 @@ fn render_legend(legend_x: usize) -> String {
 
     // Header section
     legend.push_str(&format!(
-        r#"  <text x="{}" y="{}" class="legend-item" font-weight="bold">Header (14 bytes)</text>
+        r#"  <text x="{}" y="{}" class="legend-item" font-weight="bold">Header (10 bytes)</text>
 "#,
         x, y
     ));
@@ -902,10 +989,8 @@ fn render_legend(legend_x: usize) -> String {
 
     let header_fields = [
         ("base_ts_offset", "4 bytes", colors::HEADER),
-        ("duration", "2 bytes", colors::HEADER),
         ("count", "2 bytes", colors::HEADER),
         ("first_value", "4 bytes", colors::HEADER),
-        ("interval", "2 bytes", colors::HEADER),
     ];
 
     for (name, size, color) in header_fields {
@@ -984,13 +1069,153 @@ fn render_legend(legend_x: usize) -> String {
     legend
 }
 
+/// Render the bitstream view section showing all bits as individual squares
+fn render_bitstream(
+    header_spans: &[BitSpan],
+    data_spans: &[BitSpan],
+    bytes: &[u8],
+    base_ts: u64,
+    first_value: i32,
+    interval: u16,
+    y_start: usize,
+) -> (String, usize) {
+    let mut svg = String::new();
+    let max_width = BITSTREAM_MAX_WIDTH;
+    let bit_size = BITSTREAM_BIT_SIZE;
+    let info_panel_x = MARGIN + max_width + 20;
+
+    // Section title
+    svg.push_str(&format!(
+        r#"  <text x="{}" y="{}" class="section-title">BITSTREAM VIEW</text>
+"#,
+        MARGIN, y_start + 15
+    ));
+
+    // Hover info panel (to the right of bitstream) using foreignObject for HTML
+    let panel_height = 300;
+    svg.push_str(&format!(
+        r#"  <rect x="{}" y="{}" width="280" height="{}" class="hover-info-box" rx="4"/>
+  <foreignObject x="{}" y="{}" width="270" height="{}">
+    <div xmlns="http://www.w3.org/1999/xhtml" id="hover-info-content" style="font-family:monospace;padding:8px;overflow-y:auto;height:{}px">
+      <div style="font-size:11px;color:#999">Hover over bits to see decoded values</div>
+    </div>
+  </foreignObject>
+"#,
+        info_panel_x, y_start + BITSTREAM_Y_OFFSET, panel_height,
+        info_panel_x + 5, y_start + BITSTREAM_Y_OFFSET + 5, panel_height - 10, panel_height - 20,
+    ));
+
+    let mut x = MARGIN;
+    let mut y = y_start + BITSTREAM_Y_OFFSET;
+    let mut current_ts = base_ts;
+    let mut current_value = first_value;
+    let mut idx: u64 = 0;
+
+    // Combine header and data spans
+    let all_spans: Vec<&BitSpan> = header_spans.iter().chain(data_spans.iter()).collect();
+
+    for span in all_spans {
+        // Calculate tooltip text based on span kind
+        let tooltip = span.kind.tooltip_text(current_ts, current_value);
+        let color = span.kind.color();
+        let span_class = format!("span-{}", span.id);
+        let encoding_label = span.kind.label();
+
+        // Get bit pattern for this span
+        let bits_str = get_bits_str(bytes, span.start_bit, span.length);
+        let bits_display: String = bits_str.iter().map(|b| if *b == 0 { '0' } else { '1' }).collect();
+
+        // Get decoded readings for this span
+        let readings = span.kind.decoded_readings(current_ts, current_value, interval);
+        let readings_str = readings.join("|");
+
+        // Escape quotes for JavaScript
+        let encoding_escaped = encoding_label.replace('\'', "\\'");
+        let readings_escaped = readings_str.replace('\'', "\\'");
+
+        let hover_handlers = format!(
+            r#"onmouseover="highlight({});showInfo('{}','{}','{}')" onmouseout="unhighlight({});clearInfo()""#,
+            span.id, encoding_escaped, bits_display, readings_escaped, span.id
+        );
+
+        // Render each bit as individual square
+        for bit_offset in 0..span.length {
+            // Check if we need to wrap to next row
+            if x + bit_size > MARGIN + max_width && x > MARGIN {
+                x = MARGIN;
+                y += bit_size;
+            }
+
+            // Get the actual bit value
+            let bit_idx = span.start_bit + bit_offset;
+            let byte_idx = bit_idx / 8;
+            let bit_in_byte = 7 - (bit_idx % 8);
+            let bit_val = if byte_idx < bytes.len() {
+                (bytes[byte_idx] >> bit_in_byte) & 1
+            } else {
+                0
+            };
+
+            svg.push_str(&format!(
+                r#"  <g class="{}" {}>
+    <rect x="{}" y="{}" width="{}" height="{}" fill="{}" class="bit"/>
+    <text x="{}" y="{}" text-anchor="middle" font-size="8">{}</text>
+    <title>{}</title>
+  </g>
+"#,
+                span_class, hover_handlers,
+                x, y, bit_size, bit_size, color,
+                x + bit_size / 2, y + bit_size / 2 + 3, bit_val,
+                tooltip
+            ));
+
+            x += bit_size;
+        }
+
+        // Update state for next span's tooltip
+        match &span.kind {
+            SpanKind::HeaderBaseTs(_)
+            | SpanKind::HeaderCount(_)
+            | SpanKind::HeaderFirstValue(_) => {
+                // Header spans don't affect timestamp/value tracking
+            }
+            SpanKind::Zero => {
+                idx += 1;
+                current_ts = base_ts + idx * interval as u64;
+            }
+            SpanKind::ZeroRun8_21(n) | SpanKind::ZeroRun22_149(n) => {
+                idx += *n as u64;
+                current_ts = base_ts + idx * interval as u64;
+            }
+            SpanKind::Delta1(d) | SpanKind::Delta2(d) | SpanKind::Delta3_10(d) | SpanKind::LargeDelta(d) => {
+                current_value += d;
+                idx += 1;
+                current_ts = base_ts + idx * interval as u64;
+            }
+            SpanKind::SingleGap => {
+                idx += 1;
+                current_ts = base_ts + idx * interval as u64;
+            }
+            SpanKind::Gap(n) => {
+                idx += *n as u64;
+                current_ts = base_ts + idx * interval as u64;
+            }
+        }
+    }
+
+    // Calculate total height used
+    let total_height = (y - y_start) + bit_size + MARGIN;
+
+    (svg, total_height)
+}
+
 /// Read a CSV file with ts,temperature columns and encode it
 /// Returns (encoded_bytes, original_readings)
 fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), String> {
     let file = File::open(path).map_err(|e| format!("Failed to open CSV: {}", e))?;
     let reader = BufReader::new(file);
 
-    let mut encoder = Encoder::new();
+    let mut encoder = Encoder::new(DEFAULT_INTERVAL);
     let mut original_readings = Vec::new();
     let mut line_num = 0;
 
@@ -1067,7 +1292,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    let (header_spans, base_ts, _duration, count, first_value, interval) = parse_header(&bytes);
+    let (header_spans, base_ts, count, first_value) = parse_header(&bytes);
+    let interval = DEFAULT_INTERVAL;
     let data_spans = parse_data(&bytes, count as usize, header_spans.len());
     let rows = build_rows(
         &header_spans,
@@ -1091,6 +1317,9 @@ fn main() {
         &rows,
         has_ground_truth,
         compression_stats.as_ref(),
+        base_ts,
+        first_value,
+        interval,
     );
 
     let output = args.output.unwrap_or_else(|| {

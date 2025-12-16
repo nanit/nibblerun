@@ -8,7 +8,7 @@
 //! - **High compression**: ~40-50 bytes per day for typical sensor data
 //! - **Fast encoding**: ~250M inserts/sec single-threaded
 //! - **O(1) append**: Add new readings without re-encoding
-//! - **Configurable intervals**: Timestamps quantized to fixed intervals (default 5 min)
+//! - **Configurable intervals**: Timestamps quantized to fixed intervals (e.g., 300s for 5 min)
 //!
 //! # Lossy vs Lossless
 //!
@@ -22,7 +22,8 @@
 //! ```
 //! use nibblerun::{Encoder, decode};
 //!
-//! let mut encoder = Encoder::new();
+//! let interval = 300; // 5 minutes
+//! let mut encoder = Encoder::new(interval);
 //! let base_ts = 1_761_000_000_u64;
 //!
 //! // Append sensor readings (timestamp, value)
@@ -34,8 +35,8 @@
 //! let bytes = encoder.to_bytes();
 //! println!("Encoded size: {} bytes", bytes.len());
 //!
-//! // Decode back
-//! let readings = decode(&bytes);
+//! // Decode back (same interval used for encoding)
+//! let readings = decode(&bytes, interval as u64);
 //! for r in &readings {
 //!     println!("ts={}, value={}", r.ts, r.value);
 //! }
@@ -43,15 +44,15 @@
 //!
 //! # Wire Format
 //!
-//! ## Header (14 bytes)
+//! ## Header (10 bytes)
 //!
 //! | Offset | Size | Field | Description |
 //! |--------|------|-------|-------------|
 //! | 0 | 4 | `base_ts_offset` | First timestamp minus epoch base (1,760,000,000). Reconstructed as `epoch_base + offset`. |
-//! | 4 | 2 | `duration` | Number of intervals from first to last reading. Metadata for quick time-span queries without decoding. |
-//! | 6 | 2 | `count` | Total number of readings stored. Used by decoder to know when to stop. |
-//! | 8 | 4 | `first_value` | First value as i32, stored directly (not delta-encoded). |
-//! | 12 | 2 | `interval` | Interval between readings in seconds (1-65535). |
+//! | 4 | 2 | `count` | Total number of readings stored. Used by decoder to know when to stop. |
+//! | 6 | 4 | `first_value` | First value as i32, stored directly (not delta-encoded). |
+//!
+//! Note: The interval is not stored in the header - it must be provided to the decoder.
 //!
 //! ## Bit-Packed Data
 //!
@@ -123,6 +124,3 @@ pub use decoder::decode;
 pub use encoder::Encoder;
 pub use error::AppendError;
 pub use reading::Reading;
-
-/// Default interval between readings (5 minutes)
-pub const DEFAULT_INTERVAL: u64 = 300;

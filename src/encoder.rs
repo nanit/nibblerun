@@ -8,7 +8,6 @@ use crate::constants::{
 };
 use crate::error::AppendError;
 use crate::reading::Reading;
-use crate::DEFAULT_INTERVAL;
 
 /// Encoder for `NibbleRun` format
 ///
@@ -32,20 +31,13 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    /// Create a new encoder with default 300-second (5-minute) interval
-    #[inline]
-    #[must_use]
-    pub fn new() -> Self {
-        Self::with_interval(DEFAULT_INTERVAL as u16)
-    }
-
-    /// Create a new encoder with a custom interval
+    /// Create a new encoder with the specified interval
     ///
     /// # Arguments
     /// * `interval` - Interval between readings in seconds (e.g., 300 for 5 minutes)
     #[inline]
     #[must_use]
-    pub fn with_interval(interval: u16) -> Self {
+    pub fn new(interval: u16) -> Self {
         Encoder {
             base_ts: 0,
             last_ts: 0,
@@ -547,16 +539,13 @@ impl Encoder {
 
         let mut result = Vec::with_capacity(HEADER_SIZE + self.data.len() + 4);
 
-        // Header
+        // Header (10 bytes)
         // Use wrapping_sub for consistent behavior in debug/release modes
         // Note: timestamps before EPOCH_BASE will produce incorrect data
         let base_ts_offset = self.base_ts.wrapping_sub(EPOCH_BASE) as u32;
-        result.extend_from_slice(&base_ts_offset.to_le_bytes());
-        let duration = div_by_interval(self.last_ts - self.base_ts, self.interval) as u16;
-        result.extend_from_slice(&duration.to_le_bytes());
-        result.extend_from_slice(&self.count.to_le_bytes());
-        result.extend_from_slice(&first_temp.to_le_bytes());
-        result.extend_from_slice(&self.interval.to_le_bytes());
+        result.extend_from_slice(&base_ts_offset.to_le_bytes()); // offset 0: 4 bytes
+        result.extend_from_slice(&self.count.to_le_bytes()); // offset 4: 2 bytes
+        result.extend_from_slice(&first_temp.to_le_bytes()); // offset 6: 4 bytes
 
         // Data
         result.extend_from_slice(&self.data);
@@ -681,11 +670,6 @@ impl Encoder {
     }
 }
 
-impl Default for Encoder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Bit reader for decoding variable-length bit sequences (internal to `Encoder::decode`)
 struct BitReader<'a> {

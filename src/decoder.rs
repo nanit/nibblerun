@@ -30,21 +30,25 @@ fn push_zero_run(
 ///
 /// # Arguments
 /// * `bytes` - Encoded bytes from `Encoder::to_bytes()`
+/// * `interval` - The interval in seconds used when encoding (must match encoder's interval)
 ///
 /// # Returns
 /// Vector of decoded readings. Returns an empty vector if bytes is too short
-/// (less than 14 bytes) or contains no readings.
+/// (less than 10 bytes) or contains no readings.
 #[must_use]
-pub fn decode(bytes: &[u8]) -> Vec<Reading> {
+pub fn decode(bytes: &[u8], interval: u64) -> Vec<Reading> {
     if bytes.len() < HEADER_SIZE {
         return Vec::new();
     }
 
+    // Header layout (10 bytes):
+    // [0-3]: base_ts_offset (4 bytes)
+    // [4-5]: count (2 bytes)
+    // [6-9]: first_value (4 bytes)
     let base_ts_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let start_ts = EPOCH_BASE + u64::from(base_ts_offset);
-    let count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
-    let first_temp = i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-    let interval = u64::from(u16::from_le_bytes([bytes[12], bytes[13]]));
+    let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+    let first_temp = i32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
 
     let mut decoded = Vec::with_capacity(count);
     if count == 0 {
