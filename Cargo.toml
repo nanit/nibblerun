@@ -5,10 +5,20 @@ edition = "2024"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+rand = "0.9"
 
 [dev-dependencies]
 proptest = "1.0"
 criterion = "0.5"
+
+[[bin]]
+name = "nbl-gen"
+path = "src/bin/nbl_gen.rs"
+
+[[bin]]
+name = "nbl-viz"
+path = "src/bin/nbl_viz.rs"
 
 [[bench]]
 name = "benchmarks"

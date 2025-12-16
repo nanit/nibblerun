@@ -83,23 +83,8 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             idx += 1;
             continue;
         }
+        // ±2: 110 + sign (4 bits total)
         if reader.read_bits(1) == 0 {
-            // Zero run 2-5: 110 + 2 bits
-            push_zero_run(&mut decoded, count, start_ts, interval, prev_temp, &mut idx, reader.read_bits(2) + 2);
-            continue;
-        }
-        if reader.read_bits(1) == 0 {
-            // Zero run 6-21: 1110 + 4 bits
-            push_zero_run(&mut decoded, count, start_ts, interval, prev_temp, &mut idx, reader.read_bits(4) + 6);
-            continue;
-        }
-        if reader.read_bits(1) == 0 {
-            // Zero run 22-149: 11110 + 7 bits
-            push_zero_run(&mut decoded, count, start_ts, interval, prev_temp, &mut idx, reader.read_bits(7) + 22);
-            continue;
-        }
-        if reader.read_bits(1) == 0 {
-            // ±2: 111110 + sign
             prev_temp = prev_temp.wrapping_add(if reader.read_bits(1) == 0 { 2 } else { -2 });
             decoded.push(Reading {
                 ts: start_ts + idx * interval,
@@ -109,7 +94,17 @@ pub fn decode(bytes: &[u8]) -> Vec<Reading> {
             continue;
         }
         if reader.read_bits(1) == 0 {
-            // ±3-10: 1111110 + 4 bits
+            // Zero run 8-21: 1110 + 4 bits
+            push_zero_run(&mut decoded, count, start_ts, interval, prev_temp, &mut idx, reader.read_bits(4) + 8);
+            continue;
+        }
+        if reader.read_bits(1) == 0 {
+            // Zero run 22-149: 11110 + 7 bits
+            push_zero_run(&mut decoded, count, start_ts, interval, prev_temp, &mut idx, reader.read_bits(7) + 22);
+            continue;
+        }
+        if reader.read_bits(1) == 0 {
+            // ±3-10: 111110 + 4 bits
             let e = reader.read_bits(4) as i32;
             prev_temp = prev_temp.wrapping_add(if e < 8 { e - 10 } else { e - 5 });
             decoded.push(Reading {

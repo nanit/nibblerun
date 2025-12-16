@@ -221,8 +221,8 @@ impl Encoder {
             (-1024..=1023).contains(&delta),
             "Delta {delta} out of range [-1024, 1023]. Temperature swings this large are not supported."
         );
-        let bits = (0b1111_1110_u32 << 11) | ((delta as u32) & 0x7FF);
-        self.write_bits(bits, 19);
+        let bits = (0b111_1110_u32 << 11) | ((delta as u32) & 0x7FF);
+        self.write_bits(bits, 18);
     }
 
     /// Get the encoded size in bytes
@@ -276,19 +276,23 @@ impl Encoder {
                 return u32::from(num_bits);
             }
         }
-        19 // Large delta encoding
+        18 // Large delta encoding
     }
 
     /// Calculate the number of bits needed to encode a zero run
+    ///
+    /// Must match the logic in `encode_zero_run`:
+    /// - n <= 7: individual zeros (1 bit each)
+    /// - n 8-21: 8-bit run encoding
+    /// - n 22-149: 12-bit run encoding
+    /// - n 150+: multiple 12-bit encodings
     #[inline]
     fn zero_run_bits(mut n: u32) -> u32 {
         let mut bits = 0;
         while n > 0 {
-            if n == 1 {
-                bits += 1;
-                n = 0;
-            } else if n <= 5 {
-                bits += 5;
+            if n <= 7 {
+                // Individual zeros: 1 bit each
+                bits += n;
                 n = 0;
             } else if n <= 21 {
                 bits += 8;
@@ -422,8 +426,19 @@ impl Encoder {
                 idx += 1;
                 continue;
             }
+            // ±2: 110 + sign (4 bits total)
             if reader.read_bits(1) == 0 {
-                for _ in 0..reader.read_bits(2) + 2 {
+                prev_temp += if reader.read_bits(1) == 0 { 2 } else { -2 };
+                decoded.push(Reading {
+                    ts: self.base_ts + idx * interval,
+                    value: prev_temp,
+                });
+                idx += 1;
+                continue;
+            }
+            if reader.read_bits(1) == 0 {
+                // 8-21 run: 1110 + 4 bits
+                for _ in 0..reader.read_bits(4) + 8 {
                     if decoded.len() >= count {
                         break;
                     }
@@ -436,19 +451,7 @@ impl Encoder {
                 continue;
             }
             if reader.read_bits(1) == 0 {
-                for _ in 0..reader.read_bits(4) + 6 {
-                    if decoded.len() >= count {
-                        break;
-                    }
-                    decoded.push(Reading {
-                        ts: self.base_ts + idx * interval,
-                        value: prev_temp,
-                    });
-                    idx += 1;
-                }
-                continue;
-            }
-            if reader.read_bits(1) == 0 {
+                // 22-149 run: 11110 + 7 bits
                 for _ in 0..reader.read_bits(7) + 22 {
                     if decoded.len() >= count {
                         break;
@@ -462,15 +465,7 @@ impl Encoder {
                 continue;
             }
             if reader.read_bits(1) == 0 {
-                prev_temp += if reader.read_bits(1) == 0 { 2 } else { -2 };
-                decoded.push(Reading {
-                    ts: self.base_ts + idx * interval,
-                    value: prev_temp,
-                });
-                idx += 1;
-                continue;
-            }
-            if reader.read_bits(1) == 0 {
+                // ±3-10: 111110 + 4 bits
                 let e = reader.read_bits(4) as i32;
                 prev_temp += if e < 8 { e - 10 } else { e - 5 };
                 decoded.push(Reading {
@@ -605,8 +600,8 @@ impl Encoder {
         }
         // Large delta: clamp to 11-bit signed range
         let clamped = delta.clamp(-1024, 1023);
-        let bits = (0b1111_1110_u32 << 11) | ((clamped as u32) & 0x7FF);
-        (bits, 19)
+        let bits = (0b111_1110_u32 << 11) | ((clamped as u32) & 0x7FF);
+        (bits, 18)
     }
 
     #[inline]
@@ -640,7 +635,7 @@ impl Encoder {
     fn write_gaps(&mut self, mut count: u32) {
         while count > 0 {
             let g = count.min(64);
-            self.write_bits((0xFF << 6) | (g - 1), 14);
+            self.write_bits((0x7F << 6) | (g - 1), 13);
             count -= g;
         }
     }

@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:rust-fuzz.github.io)",
+      "Bash(cargo cov:*)",
+      "Bash(rustup run nightly rustc:*)",
+      "Bash(cargo +nightly fuzz coverage:*)",
+      "Bash(for target in fuzz_decode fuzz_roundtrip fuzz_gaps fuzz_idempotent fuzz_lossy_bounds fuzz_single_reading fuzz_averaging)",
+      "Bash(do)",
+      "Bash(echo:*)",
+      "Bash(cargo +nightly fuzz run:*)",
+      "Bash(done)",
+      "Bash(/Users/quatrix/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-cov:*)",
+      "Bash(/usr/bin/grep:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo llvm-cov:*)",
+      "Bash(cargo bench:*)",
+      "Bash(./target/release/nbl-viz:*)",
+      "Bash(./target/release/nbl-gen:*)",
+      "Bash(cargo build:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

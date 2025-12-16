@@ -79,20 +79,19 @@ Temperature values are stored as deltas from the previous reading. Deltas are en
 |-------|----------|------|
 | 0 (repeated) | `0` | 1 |
 | ±1 | `10x` | 3 |
-| ±2 | `111110x` | 7 |
-| ±3 to ±10 | `1111110xxxx` | 11 |
-| ±11 to ±1023 | `11111110xxxxxxxxxxx` | 19 |
+| ±2 | `110x` | 4 |
+| ±3 to ±10 | `111110xxxx` | 10 |
+| ±11 to ±1023 | `1111110xxxxxxxxxxx` | 18 |
 
 ### Zero-Run Encoding
 
-Consecutive zero deltas (unchanged temperatures) use run-length encoding:
+Consecutive zero deltas (unchanged temperatures) are optimized for efficiency:
 
-| Run Length | Encoding | Bits |
-|------------|----------|------|
-| 1 | `0` | 1 |
-| 2-5 | `110xx` | 5 |
-| 6-21 | `1110xxxx` | 8 |
-| 22-149 | `11110xxxxxxx` | 12 |
+| Run Length | Encoding | Bits | Notes |
+|------------|----------|------|-------|
+| 1-7 | `0` × n | 1-7 | Individual zeros (more efficient than run encoding) |
+| 8-21 | `1110xxxx` | 8 | Run-length encoding |
+| 22-149 | `11110xxxxxxx` | 12 | Run-length encoding |
 
 ### Wire Format
 
@@ -310,6 +309,66 @@ cargo +nightly fuzz coverage fuzz_decode
 ### Current Coverage
 
 Unit tests achieve ~98% line coverage across all source files.
+
+## CLI Tools
+
+The crate includes two command-line utilities for generating and visualizing encoded data.
+
+### nbl-gen
+
+Generate sample nibblerun time series data:
+
+```bash
+# Generate 24 hours of data (288 readings at 5-min intervals)
+nbl-gen day.nbl
+
+# Generate with random gaps (sensor offline periods)
+nbl-gen day.nbl --gaps
+
+# Generate with occasional temperature spikes
+nbl-gen day.nbl --spikes
+
+# Customize readings count and interval
+nbl-gen custom.nbl --readings 100 --interval 600 --base-temp 25
+```
+
+Options:
+- `--readings N` - Number of readings (default: 288)
+- `--gaps` - Include random gaps (5% chance per reading)
+- `--spikes` - Include occasional large temperature changes (2% chance)
+- `--base-temp N` - Base temperature in Celsius (default: 22)
+- `--interval N` - Interval in seconds (default: 300)
+
+### nbl-viz
+
+Visualize the internal bit-level structure of encoded data as SVG:
+
+```bash
+# Generate SVG visualization
+nbl-viz day.nbl -o day.svg
+
+# Output defaults to input filename with .svg extension
+nbl-viz day.nbl  # creates day.svg
+```
+
+The SVG shows:
+- **Header section**: 14 bytes with labeled fields (base_ts, duration, count, first_value, interval)
+- **Bit grid**: Each bit as a colored square, grouped by encoding type
+- **Span labels**: Decoded meaning below each bit group (+1, -2, run=5, gap=3, etc.)
+- **Decoded timeline**: Human-readable list of timestamps and values
+
+Color scheme:
+| Encoding | Color |
+|----------|-------|
+| Header fields | Light blue |
+| Zero (single) | Light green |
+| Zero-run 8-21 | Green |
+| Zero-run 22-149 | Darker green |
+| Delta ±1 | Light orange |
+| Delta ±2 | Orange |
+| Delta ±3-10 | Darker orange |
+| Large delta | Red |
+| Gap marker | Purple |
 
 ## License
 

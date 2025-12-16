@@ -59,15 +59,14 @@
 //!
 //! | Delta | Encoding | Bits | Description |
 //! |-------|----------|------|-------------|
-//! | 0 | `0` | 1 | Single unchanged value |
-//! | 0 (run) | `110xx` | 5 | 2-5 consecutive unchanged values |
-//! | 0 (run) | `1110xxxx` | 8 | 6-21 consecutive unchanged values |
+//! | 0 | `0` | 1 | Unchanged value (runs of 1-7 use individual zeros) |
+//! | 0 (run) | `1110xxxx` | 8 | 8-21 consecutive unchanged values |
 //! | 0 (run) | `11110xxxxxxx` | 12 | 22-149 consecutive unchanged values |
 //! | ±1 | `10x` | 3 | x=0 for +1, x=1 for -1 |
-//! | ±2 | `111110x` | 7 | x=0 for +2, x=1 for -2 |
-//! | ±3..±10 | `1111110xxxx` | 11 | 4-bit signed offset from ±3 |
-//! | ±11..±1023 | `11111110xxxxxxxxxxx` | 19 | 11-bit signed value |
-//! | gap | `11111111xxxxxx` | 14 | Skip 1-64 intervals (no data). Larger gaps use multiple markers. |
+//! | ±2 | `110x` | 4 | x=0 for +2, x=1 for -2 |
+//! | ±3..±10 | `111110xxxx` | 10 | 4-bit signed offset from ±3 |
+//! | ±11..±1023 | `1111110xxxxxxxxxxx` | 18 | 11-bit signed value |
+//! | gap | `1111111xxxxxx` | 13 | Skip 1-64 intervals (no data). Larger gaps use multiple markers. |
 //!
 //! # Internal Implementation
 //!
@@ -89,14 +88,14 @@
 //!
 //! ## Zero-Run Encoding
 //!
-//! Consecutive unchanged values are encoded using run-length encoding with tiered
-//! prefix codes. A single `0` bit means "same as previous". Longer runs use progressively
-//! longer codes to encode the run length, up to 149 values per code. Runs longer than
-//! 149 use multiple codes.
+//! Consecutive unchanged values are optimized for efficiency. Short runs (1-7 values)
+//! use individual `0` bits since this is more compact than run-length encoding.
+//! Longer runs (8+) use tiered prefix codes: 8 bits for 8-21 values, 12 bits for
+//! 22-149 values. Runs longer than 149 use multiple codes.
 //!
 //! ## Gap Encoding
 //!
-//! When intervals have no data (sensor offline, gaps in collection), a special 14-bit
+//! When intervals have no data (sensor offline, gaps in collection), a special 13-bit
 //! gap marker encodes up to 64 skipped intervals. This is more efficient than storing
 //! placeholder values and preserves the actual timing of readings.
 //!
