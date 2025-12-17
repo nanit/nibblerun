@@ -23,6 +23,8 @@ pub enum AppendError {
         prev_value: i32,
         new_value: i32,
     },
+    /// Timestamp exceeds maximum time span (~227 days at 300s interval, ~45 days at 60s)
+    TimeSpanOverflow { ts: u64, base_ts: u64, max_intervals: u32 },
 }
 
 impl fmt::Display for AppendError {
@@ -53,6 +55,12 @@ impl fmt::Display for AppendError {
                 write!(
                     f,
                     "value delta {delta} ({prev_value} -> {new_value}) exceeds range [-1024, 1023]"
+                )
+            }
+            Self::TimeSpanOverflow { ts, base_ts, max_intervals } => {
+                write!(
+                    f,
+                    "timestamp {ts} exceeds maximum time span from base {base_ts} (max {max_intervals} intervals)"
                 )
             }
         }

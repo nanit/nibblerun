@@ -1,6 +1,45 @@
 use crate::constants::{div_by_interval, EPOCH_BASE};
 use crate::{decode, AppendError, Encoder};
 
+/// ============================================================================
+/// STRUCT SIZE GUARD - DO NOT MODIFY WITHOUT EXPLICIT AGREEMENT
+/// ============================================================================
+/// These sizes are carefully optimized for memory efficiency. The Encoder struct
+/// uses bit-packing and field size optimization to minimize memory footprint.
+///
+/// If this test fails after your changes, you have accidentally increased the
+/// struct size. This is a REGRESSION and should not be committed unless:
+/// 1. There is explicit agreement to increase the size
+/// 2. The increase is justified and documented
+/// 3. The performance/memory impact has been analyzed
+///
+/// Current optimizations:
+/// - `zero_run` is packed into unused bits 42-57 of `pending_avg`
+/// - `prev_logical_idx` is u16 instead of u32 (max ~227 days at 300s interval)
+/// - `bit_count` remains a separate u8 for hot-path performance
+/// ============================================================================
+#[test]
+fn test_encoder_struct_sizes_guard() {
+    use std::mem::size_of;
+
+    // These sizes MUST NOT increase without explicit agreement
+    assert_eq!(
+        size_of::<Encoder<i8>>(),
+        48,
+        "Encoder<i8> size increased! Was 48 bytes. DO NOT increase without explicit agreement."
+    );
+    assert_eq!(
+        size_of::<Encoder<i16>>(),
+        56,
+        "Encoder<i16> size increased! Was 56 bytes. DO NOT increase without explicit agreement."
+    );
+    assert_eq!(
+        size_of::<Encoder<i32>>(),
+        56,
+        "Encoder<i32> size increased! Was 56 bytes. DO NOT increase without explicit agreement."
+    );
+}
+
 #[test]
 fn test_div_by_interval() {
     for x in [0, 1, 299, 300, 301, 599, 600, 1000, 10000, 100000, 200000] {
@@ -2230,8 +2269,8 @@ fn test_all_encoding_prefixes() {
 
 #[test]
 fn test_large_gap_exceeding_u16() {
-    // Test that gaps larger than u16::MAX intervals are handled correctly
-    // by emitting multiple gap markers
+    // Test that gaps larger than u16::MAX intervals return TimeSpanOverflow error
+    // (memory optimization limits time span to ~227 days at 300s interval)
     let base_ts = EPOCH_BASE;
     let mut enc = Encoder::<i32>::new();
 
@@ -2241,63 +2280,34 @@ fn test_large_gap_exceeding_u16() {
     // Add second reading at gap of 70,000 intervals (exceeds u16::MAX = 65535)
     let large_gap: u64 = 70_000;
     let second_ts = base_ts + large_gap * 300;
-    enc.append(second_ts, 200).unwrap();
+    let result = enc.append(second_ts, 200);
 
-    // Should have 2 readings
-    assert_eq!(enc.count(), 2);
+    // Should fail with TimeSpanOverflow
+    assert!(matches!(result, Err(AppendError::TimeSpanOverflow { .. })));
 
-    // Decode and verify
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-
-    // First reading
-    assert_eq!(decoded[0].ts, base_ts);
-    assert_eq!(decoded[0].value, 100);
-
-    // Second reading - should be at correct timestamp
-    assert_eq!(decoded[1].ts, second_ts);
-    assert_eq!(decoded[1].value, 200);
-
-    // Verify via to_bytes/decode roundtrip
-    let bytes = enc.to_bytes();
-    let decoded_from_bytes = decode::<i32, 300>(&bytes);
-    assert_eq!(decoded_from_bytes.len(), 2);
-    assert_eq!(decoded_from_bytes[0].ts, base_ts);
-    assert_eq!(decoded_from_bytes[0].value, 100);
-    assert_eq!(decoded_from_bytes[1].ts, second_ts);
-    assert_eq!(decoded_from_bytes[1].value, 200);
+    // First reading should still be there
+    assert_eq!(enc.count(), 1);
 }
 
 #[test]
 fn test_very_large_gap_100k_intervals() {
-    // Even larger gap to stress test multiple gap marker emission
+    // Test that very large gaps (100k intervals) return TimeSpanOverflow error
+    // (memory optimization limits time span to ~227 days at 300s interval)
     let base_ts = EPOCH_BASE;
     let mut enc = Encoder::<i32>::new();
 
     enc.append(base_ts, 50).unwrap();
 
-    // Gap of 100,000 intervals
+    // Gap of 100,000 intervals (exceeds u16::MAX = 65535)
     let large_gap: u64 = 100_000;
     let second_ts = base_ts + large_gap * 300;
-    enc.append(second_ts, 75).unwrap();
+    let result = enc.append(second_ts, 75);
 
-    // Add a third reading shortly after
-    let third_ts = second_ts + 300;
-    enc.append(third_ts, 76).unwrap();
+    // Should fail with TimeSpanOverflow
+    assert!(matches!(result, Err(AppendError::TimeSpanOverflow { .. })));
 
-    assert_eq!(enc.count(), 3);
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 3);
-
-    assert_eq!(decoded[0].ts, base_ts);
-    assert_eq!(decoded[0].value, 50);
-
-    assert_eq!(decoded[1].ts, second_ts);
-    assert_eq!(decoded[1].value, 75);
-
-    assert_eq!(decoded[2].ts, third_ts);
-    assert_eq!(decoded[2].value, 76);
+    // First reading should still be there
+    assert_eq!(enc.count(), 1);
 }
 
 #[test]
@@ -2323,21 +2333,240 @@ fn test_gap_at_u16_boundary() {
 
 #[test]
 fn test_gap_just_over_u16_max() {
-    // Test gap just over u16::MAX (65536 intervals)
+    // Test gap just over u16::MAX (65536 intervals) returns TimeSpanOverflow error
     let base_ts = EPOCH_BASE;
     let mut enc = Encoder::<i32, 1>::new(); // 1 second interval
 
     enc.append(base_ts, 10).unwrap();
 
-    // Gap of u16::MAX + 1
+    // Gap of u16::MAX + 1 (exceeds max)
     let gap: u64 = u64::from(u16::MAX) + 1;
     let second_ts = base_ts + gap; // interval is 1
+    let result = enc.append(second_ts, 20);
+
+    // Should fail with TimeSpanOverflow
+    assert!(matches!(result, Err(AppendError::TimeSpanOverflow { .. })));
+
+    // First reading should still be there
+    assert_eq!(enc.count(), 1);
+}
+
+// ============================================================================
+// OPTIMIZATION BOUNDARY TESTS
+// These tests verify the boundaries introduced by memory optimizations:
+// - zero_run packed into bits 42-57 of pending_avg (16 bits, max 65535)
+// - prev_logical_idx changed from u32 to u16 (max 65535 intervals)
+// ============================================================================
+
+#[test]
+fn test_zero_run_with_concurrent_averaging() {
+    // Test that zero_run (packed in bits 42-57) doesn't interfere with
+    // averaging data (bits 0-41) when both are active simultaneously
+    let base_ts = EPOCH_BASE;
+    let mut enc = Encoder::<i32>::new();
+
+    // First reading
+    enc.append(base_ts, 20).unwrap();
+
+    // Create a zero run by adding same temperature
+    for i in 1..=10 {
+        enc.append(base_ts + i * 300, 20).unwrap();
+    }
+
+    // Now start a new interval with multiple readings (triggers averaging)
+    // while zero_run counter is still non-zero
+    let new_interval_ts = base_ts + 11 * 300;
+    enc.append(new_interval_ts, 25).unwrap();
+    enc.append(new_interval_ts + 100, 27).unwrap(); // Same interval, will average to 26
+    enc.append(new_interval_ts + 200, 26).unwrap(); // Same interval, average stays 26
+
+    // Move to next interval to finalize
+    enc.append(base_ts + 12 * 300, 30).unwrap();
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 13);
+
+    // Verify zero run was encoded correctly
+    for i in 0..=10 {
+        assert_eq!(decoded[i].value, 20, "Zero run reading {} should be 20", i);
+    }
+
+    // Verify averaging worked correctly (25+27+26)/3 = 26
+    assert_eq!(decoded[11].value, 26, "Averaged reading should be 26");
+    assert_eq!(decoded[12].value, 30);
+
+    // Verify roundtrip through bytes
+    let bytes = enc.to_bytes();
+    let decoded_bytes = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded_bytes.len(), 13);
+    assert_eq!(decoded_bytes[11].value, 26);
+}
+
+#[test]
+fn test_zero_run_max_accumulation() {
+    // Test accumulating a large zero run (500+) to verify bit packing holds
+    let base_ts = EPOCH_BASE;
+    let mut enc = Encoder::<i32>::new();
+
+    enc.append(base_ts, 22).unwrap();
+
+    // Add 500 readings with same temperature (large zero run)
+    for i in 1..=500 {
+        enc.append(base_ts + i * 300, 22).unwrap();
+    }
+
+    // Add different temperature to flush
+    enc.append(base_ts + 501 * 300, 23).unwrap();
+
+    assert_eq!(enc.count(), 502);
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 502);
+
+    // All but last should be 22
+    for i in 0..501 {
+        assert_eq!(decoded[i].value, 22, "Reading {} should be 22", i);
+    }
+    assert_eq!(decoded[501].value, 23);
+
+    // Verify roundtrip
+    let bytes = enc.to_bytes();
+    let decoded_bytes = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded_bytes.len(), 502);
+}
+
+#[test]
+fn test_interval_boundary_u16_max_minus_one() {
+    // Test at u16::MAX - 1 intervals (65534) - should succeed
+    let base_ts = EPOCH_BASE;
+    let mut enc = Encoder::<i32, 1>::new(); // 1 second interval
+
+    enc.append(base_ts, 10).unwrap();
+
+    // Gap at u16::MAX - 1
+    let gap: u64 = u64::from(u16::MAX) - 1;
+    let second_ts = base_ts + gap;
     enc.append(second_ts, 20).unwrap();
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].ts, base_ts);
-    assert_eq!(decoded[0].value, 10);
     assert_eq!(decoded[1].ts, second_ts);
-    assert_eq!(decoded[1].value, 20);
+
+    // Verify roundtrip
+    let bytes = enc.to_bytes();
+    let decoded_bytes = decode::<i32, 1>(&bytes);
+    assert_eq!(decoded_bytes.len(), 2);
+    assert_eq!(decoded_bytes[1].ts, second_ts);
+}
+
+#[test]
+fn test_multiple_readings_at_max_interval() {
+    // Test multiple readings spread across the maximum time span
+    let base_ts = EPOCH_BASE;
+    let mut enc = Encoder::<i32, 1>::new(); // 1 second interval
+
+    enc.append(base_ts, 10).unwrap();
+
+    // Add reading at 1/3 of max
+    let one_third = u64::from(u16::MAX) / 3;
+    enc.append(base_ts + one_third, 15).unwrap();
+
+    // Add reading at 2/3 of max
+    let two_thirds = (u64::from(u16::MAX) / 3) * 2;
+    enc.append(base_ts + two_thirds, 20).unwrap();
+
+    // Add reading at exactly max
+    let max_gap = u64::from(u16::MAX);
+    enc.append(base_ts + max_gap, 25).unwrap();
+
+    assert_eq!(enc.count(), 4);
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 4);
+    assert_eq!(decoded[0].value, 10);
+    assert_eq!(decoded[1].value, 15);
+    assert_eq!(decoded[2].value, 20);
+    assert_eq!(decoded[3].value, 25);
+
+    // Verify timestamps
+    assert_eq!(decoded[3].ts, base_ts + max_gap);
+
+    // Verify roundtrip
+    let bytes = enc.to_bytes();
+    let decoded_bytes = decode::<i32, 1>(&bytes);
+    assert_eq!(decoded_bytes.len(), 4);
+}
+
+#[test]
+fn test_time_span_overflow_error_details() {
+    // Verify TimeSpanOverflow error contains useful information
+    let base_ts = EPOCH_BASE;
+    let mut enc = Encoder::<i32, 1>::new();
+
+    enc.append(base_ts, 10).unwrap();
+
+    let overflow_ts = base_ts + u64::from(u16::MAX) + 1;
+    let result = enc.append(overflow_ts, 20);
+
+    match result {
+        Err(AppendError::TimeSpanOverflow { ts, base_ts: err_base, max_intervals }) => {
+            assert_eq!(ts, overflow_ts);
+            assert_eq!(err_base, base_ts);
+            assert_eq!(max_intervals, u32::from(u16::MAX));
+        }
+        _ => panic!("Expected TimeSpanOverflow error"),
+    }
+
+    // Verify error message formatting
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains(&overflow_ts.to_string()));
+    assert!(msg.contains("65535"));
+}
+
+#[test]
+fn test_zero_run_then_gap_then_zero_run() {
+    // Test sequence: zero run -> gap -> zero run
+    // Verifies zero_run counter resets properly after gaps
+    let base_ts = EPOCH_BASE;
+    let mut enc = Encoder::<i32>::new();
+
+    enc.append(base_ts, 20).unwrap();
+
+    // First zero run (5 readings)
+    for i in 1..=5 {
+        enc.append(base_ts + i * 300, 20).unwrap();
+    }
+
+    // Gap (skip 3 intervals)
+    enc.append(base_ts + 9 * 300, 20).unwrap();
+
+    // Second zero run (5 more readings)
+    for i in 10..=14 {
+        enc.append(base_ts + i * 300, 20).unwrap();
+    }
+
+    // Different value to flush
+    enc.append(base_ts + 15 * 300, 25).unwrap();
+
+    let decoded = enc.decode();
+    assert_eq!(decoded.len(), 13); // 6 + 1 (after gap) + 5 + 1 = 13
+
+    // Verify all readings before the gap are 20
+    for i in 0..6 {
+        assert_eq!(decoded[i].value, 20, "Pre-gap reading {} should be 20", i);
+    }
+
+    // After gap, all should be 20 until the last
+    for i in 6..12 {
+        assert_eq!(decoded[i].value, 20, "Post-gap reading {} should be 20", i);
+    }
+
+    assert_eq!(decoded[12].value, 25);
+
+    // Verify roundtrip
+    let bytes = enc.to_bytes();
+    let decoded_bytes = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded_bytes.len(), 13);
 }
