@@ -608,15 +608,23 @@ impl Stats {
         }
 
         let single_gaps_count = *self.gap_counts.get(&1).unwrap_or(&0);
+        let mut multi_gaps_count: u64 = 0;
         let mut multi_gaps_bits: u64 = 0;
         for (gap_size, count) in &self.gap_counts {
             match *gap_size {
                 1 => {}
-                2..=65 => multi_gaps_bits += count * 14,
-                n => multi_gaps_bits += count * 14 * u64::from(n).div_ceil(64),
+                2..=65 => {
+                    multi_gaps_count += count;
+                    multi_gaps_bits += count * 14;
+                }
+                n => {
+                    multi_gaps_count += count;
+                    multi_gaps_bits += count * 14 * u64::from(n).div_ceil(64);
+                }
             }
         }
-        let gap_bits: u64 = single_gaps_count * 3 + multi_gaps_bits;
+        let single_gap_bits = single_gaps_count * 3;
+        let gap_bits: u64 = single_gap_bits + multi_gaps_bits;
 
         let pm1_bits = pm1 * 3;
         let pm2_bits = pm2 * 5;
@@ -624,26 +632,26 @@ impl Stats {
         let tier_11_plus_bits = tier_11_plus * 19;
         let total_bits = zero_run_bits + pm1_bits + pm2_bits + tier_3_10_bits + tier_11_plus_bits + gap_bits;
 
-        // Delta distribution data (sorted by delta value, -20 to +20)
+        // Delta distribution data (sorted by delta value, -15 to +15 to show tier boundaries)
         let mut delta_labels = Vec::new();
         let mut delta_values = Vec::new();
-        for d in -20..=20 {
+        for d in -15..=15 {
             delta_labels.push(d.to_string());
             delta_values.push(*self.delta_counts.get(&d).unwrap_or(&0));
         }
 
-        // Zero-run length distribution (1-50)
+        // Zero-run length distribution (1-160 to show tier boundaries at 7, 21, 149)
         let mut zr_labels = Vec::new();
         let mut zr_values = Vec::new();
-        for len in 1..=50 {
+        for len in 1..=160 {
             zr_labels.push(len.to_string());
             zr_values.push(*self.zero_run_lengths.get(&len).unwrap_or(&0));
         }
 
-        // Gap size distribution (1-20)
+        // Gap size distribution (1-70 to show tier boundary at 65)
         let mut gap_labels = Vec::new();
         let mut gap_values = Vec::new();
-        for g in 1..=20 {
+        for g in 1..=70 {
             gap_labels.push(g.to_string());
             gap_values.push(*self.gap_counts.get(&g).unwrap_or(&0));
         }
@@ -683,463 +691,396 @@ impl Stats {
             cumulative_zr_values.push((zr_cumsum as f64 / total_runs as f64 * 100.0) as f64);
         }
 
+        // Calculate actual compression ratio
+        let actual_ratio = self.raw_input_bytes as f64 / self.actual_compressed_bytes as f64;
+        let raw_mb = self.raw_input_bytes as f64 / 1_000_000.0;
+        let compressed_mb = self.actual_compressed_bytes as f64 / 1_000_000.0;
+
         write!(file, r##"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NibbleRun Data Analysis</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <title>NibbleRun Compression Analysis</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <style>
-        * {{ box-sizing: border-box; }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: #f5f5f5;
-            color: #333;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            line-height: 1.5;
         }}
-        h1 {{
-            text-align: center;
-            color: #1976D2;
-            margin-bottom: 10px;
-        }}
-        .subtitle {{
-            text-align: center;
-            color: #666;
-            margin-bottom: 30px;
-        }}
-        .stats-row {{
-            display: flex;
-            justify-content: center;
-            gap: 20px;
-            margin-bottom: 30px;
-            flex-wrap: wrap;
-        }}
-        .stat-card {{
-            background: white;
-            padding: 20px 30px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            text-align: center;
-        }}
-        .stat-value {{
-            font-size: 2em;
-            font-weight: bold;
-            color: #1976D2;
-        }}
-        .stat-label {{
-            color: #666;
-            font-size: 0.9em;
-        }}
-        .charts-grid {{
+        .container {{ max-width: 1400px; margin: 0 auto; padding: 32px; }}
+        header {{ margin-bottom: 32px; }}
+        h1 {{ font-size: 28px; font-weight: 600; color: #f0f6fc; margin-bottom: 8px; }}
+        .subtitle {{ color: #7d8590; font-size: 14px; }}
+        .metrics {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
-            gap: 20px;
-            max-width: 1400px;
-            margin: 0 auto;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 24px;
         }}
-        .chart-card {{
-            background: white;
-            padding: 20px;
+        .metric {{
+            background: linear-gradient(135deg, #161b22 0%, #1c2128 100%);
+            border: 1px solid #30363d;
             border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 20px;
         }}
-        .chart-card h3 {{
-            margin-top: 0;
-            color: #333;
-            border-bottom: 2px solid #1976D2;
-            padding-bottom: 10px;
+        .metric-value {{
+            font-size: 28px;
+            font-weight: 700;
+            color: #58a6ff;
+            font-variant-numeric: tabular-nums;
         }}
-        .chart-container {{
-            position: relative;
-            height: 300px;
+        .metric-value.green {{ color: #3fb950; }}
+        .metric-label {{
+            font-size: 12px;
+            color: #7d8590;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 4px;
         }}
-        .pie-container {{
-            position: relative;
-            height: 350px;
+        .grid {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }}
+        @media (max-width: 1000px) {{ .grid {{ grid-template-columns: 1fr; }} }}
+        .panel {{
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
         }}
+        .panel.wide {{ grid-column: span 2; }}
+        @media (max-width: 1000px) {{ .panel.wide {{ grid-column: span 1; }} }}
+        .panel-title {{
+            font-size: 14px;
+            font-weight: 600;
+            color: #e6edf3;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #21262d;
+        }}
+        .plot {{ height: 300px; }}
         footer {{
+            margin-top: 32px;
+            padding-top: 16px;
+            border-top: 1px solid #21262d;
             text-align: center;
-            margin-top: 40px;
-            color: #999;
-            font-size: 0.9em;
+            color: #484f58;
+            font-size: 12px;
         }}
     </style>
 </head>
 <body>
-    <h1>NibbleRun Data Analysis</h1>
-    <p class="subtitle">Compression statistics for {files} files, {readings} readings</p>
+<div class="container">
+    <header>
+        <h1>NibbleRun Compression Analysis</h1>
+        <p class="subtitle">{files} sensor files · {readings} total readings</p>
+    </header>
 
-    <div class="stats-row">
-        <div class="stat-card">
-            <div class="stat-value">{compression_ratio:.1}x</div>
-            <div class="stat-label">Compression Ratio</div>
+    <div class="metrics">
+        <div class="metric">
+            <div class="metric-value green">{compression_ratio:.1}x</div>
+            <div class="metric-label">Compression Ratio</div>
         </div>
-        <div class="stat-card">
-            <div class="stat-value">{zero_pct:.1}%</div>
-            <div class="stat-label">Zero Deltas</div>
+        <div class="metric">
+            <div class="metric-value">{raw_mb:.1} MB</div>
+            <div class="metric-label">Raw Size</div>
         </div>
-        <div class="stat-card">
-            <div class="stat-value">{temp_range}</div>
-            <div class="stat-label">Temperature Range</div>
+        <div class="metric">
+            <div class="metric-value green">{compressed_mb:.2} MB</div>
+            <div class="metric-label">Compressed</div>
         </div>
-        <div class="stat-card">
-            <div class="stat-value">{total_bytes}</div>
-            <div class="stat-label">Compressed Size</div>
+        <div class="metric">
+            <div class="metric-value">{zero_pct:.1}%</div>
+            <div class="metric-label">Zero Deltas</div>
         </div>
-    </div>
-
-    <div class="charts-grid">
-        <div class="chart-card">
-            <h3>Delta Distribution</h3>
-            <div class="chart-container">
-                <canvas id="deltaChart"></canvas>
-            </div>
-        </div>
-
-        <div class="chart-card">
-            <h3>Bit Cost by Encoding Tier</h3>
-            <div class="pie-container">
-                <canvas id="bitCostChart"></canvas>
-            </div>
-        </div>
-
-        <div class="chart-card">
-            <h3>Zero-Run Length Distribution</h3>
-            <div class="chart-container">
-                <canvas id="zeroRunChart"></canvas>
-            </div>
-        </div>
-
-        <div class="chart-card">
-            <h3>Event Distribution</h3>
-            <div class="pie-container">
-                <canvas id="eventChart"></canvas>
-            </div>
-        </div>
-
-        <div class="chart-card">
-            <h3>Gap Size Distribution</h3>
-            <div class="chart-container">
-                <canvas id="gapChart"></canvas>
-            </div>
-        </div>
-
-        <div class="chart-card">
-            <h3>Temperature Distribution</h3>
-            <div class="chart-container">
-                <canvas id="tempChart"></canvas>
-            </div>
-        </div>
-
-        <div class="chart-card">
-            <h3>Cumulative Delta Distribution (CDF)</h3>
-            <div class="chart-container">
-                <canvas id="cdfDeltaChart"></canvas>
-            </div>
-        </div>
-
-        <div class="chart-card">
-            <h3>Cumulative Zero-Run Distribution (CDF)</h3>
-            <div class="chart-container">
-                <canvas id="cdfZeroRunChart"></canvas>
-            </div>
+        <div class="metric">
+            <div class="metric-value">{temp_range}</div>
+            <div class="metric-label">Temp Range</div>
         </div>
     </div>
 
-    <footer>
-        Generated by nbl-analyze · NibbleRun Time Series Compression
-    </footer>
+    <div class="grid">
+        <div class="panel wide">
+            <div class="panel-title">Delta Value Distribution</div>
+            <div id="deltaChart" class="plot"></div>
+        </div>
 
-    <script>
-        // Delta distribution chart
-        new Chart(document.getElementById('deltaChart'), {{
-            type: 'bar',
-            data: {{
-                labels: {delta_labels:?},
-                datasets: [{{
-                    label: 'Count',
-                    data: {delta_values:?},
-                    backgroundColor: 'rgba(25, 118, 210, 0.7)',
-                    borderColor: 'rgba(25, 118, 210, 1)',
-                    borderWidth: 1
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{ display: false }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: (ctx) => `${{ctx.parsed.y.toLocaleString()}} occurrences`
-                        }}
-                    }}
-                }},
-                scales: {{
-                    x: {{ title: {{ display: true, text: 'Delta Value' }} }},
-                    y: {{
-                        type: 'logarithmic',
-                        title: {{ display: true, text: 'Count (log scale)' }},
-                        min: 1
-                    }}
-                }}
-            }}
-        }});
+        <div class="panel">
+            <div class="panel-title">Bit Cost by Encoding Tier</div>
+            <div id="bitCostChart" class="plot"></div>
+        </div>
 
-        // Bit cost pie chart
-        new Chart(document.getElementById('bitCostChart'), {{
-            type: 'doughnut',
-            data: {{
-                labels: ['Zero runs', '±1 deltas', '±2 deltas', '±3-10 deltas', '±11+ deltas', 'Gaps'],
-                datasets: [{{
-                    data: [{zero_run_bits}, {pm1_bits}, {pm2_bits}, {tier_3_10_bits}, {tier_11_plus_bits}, {gap_bits}],
-                    backgroundColor: [
-                        '#4CAF50',
-                        '#FF9800',
-                        '#FFB74D',
-                        '#FFCC80',
-                        '#EF5350',
-                        '#9C27B0'
-                    ]
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{ position: 'right' }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: (ctx) => {{
-                                const bits = ctx.parsed;
-                                const pct = (bits / {total_bits} * 100).toFixed(1);
-                                return `${{bits.toLocaleString()}} bits (${{pct}}%)`;
-                            }}
-                        }}
-                    }}
-                }}
-            }}
-        }});
+        <div class="panel">
+            <div class="panel-title">Event Type Distribution</div>
+            <div id="eventChart" class="plot"></div>
+        </div>
 
-        // Zero-run length chart
-        new Chart(document.getElementById('zeroRunChart'), {{
-            type: 'bar',
-            data: {{
-                labels: {zr_labels:?},
-                datasets: [{{
-                    label: 'Count',
-                    data: {zr_values:?},
-                    backgroundColor: 'rgba(76, 175, 80, 0.7)',
-                    borderColor: 'rgba(76, 175, 80, 1)',
-                    borderWidth: 1
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{ display: false }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: (ctx) => `${{ctx.parsed.y.toLocaleString()}} runs`
-                        }}
-                    }}
-                }},
-                scales: {{
-                    x: {{ title: {{ display: true, text: 'Run Length' }} }},
-                    y: {{
-                        type: 'logarithmic',
-                        title: {{ display: true, text: 'Count (log scale)' }},
-                        min: 1
-                    }}
-                }}
-            }}
-        }});
+        <div class="panel wide">
+            <div class="panel-title">Zero-Run Length Distribution</div>
+            <div id="zeroRunChart" class="plot"></div>
+        </div>
 
-        // Event distribution pie chart
-        new Chart(document.getElementById('eventChart'), {{
-            type: 'doughnut',
-            data: {{
-                labels: ['Zero (δ=0)', '±1', '±2', '±3-10', '±11+', 'Gaps'],
-                datasets: [{{
-                    data: [{zeros}, {pm1}, {pm2}, {tier_3_10}, {tier_11_plus}, {total_gaps}],
-                    backgroundColor: [
-                        '#4CAF50',
-                        '#FF9800',
-                        '#FFB74D',
-                        '#FFCC80',
-                        '#EF5350',
-                        '#9C27B0'
-                    ]
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{ position: 'right' }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: (ctx) => {{
-                                const total = {total_events};
-                                const pct = (ctx.parsed / total * 100).toFixed(2);
-                                return `${{ctx.parsed.toLocaleString()}} (${{pct}}%)`;
-                            }}
-                        }}
-                    }}
-                }}
-            }}
-        }});
+        <div class="panel wide">
+            <div class="panel-title">Temperature Distribution</div>
+            <div id="tempChart" class="plot"></div>
+        </div>
 
-        // Gap size chart
-        new Chart(document.getElementById('gapChart'), {{
-            type: 'bar',
-            data: {{
-                labels: {gap_labels:?},
-                datasets: [{{
-                    label: 'Count',
-                    data: {gap_values:?},
-                    backgroundColor: 'rgba(156, 39, 176, 0.7)',
-                    borderColor: 'rgba(156, 39, 176, 1)',
-                    borderWidth: 1
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{ display: false }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: (ctx) => `${{ctx.parsed.y.toLocaleString()}} gaps`
-                        }}
-                    }}
-                }},
-                scales: {{
-                    x: {{ title: {{ display: true, text: 'Gap Size (intervals)' }} }},
-                    y: {{
-                        type: 'logarithmic',
-                        title: {{ display: true, text: 'Count (log scale)' }},
-                        min: 1
-                    }}
-                }}
-            }}
-        }});
+        <div class="panel wide">
+            <div class="panel-title">Gap Size Distribution</div>
+            <div id="gapChart" class="plot"></div>
+        </div>
 
-        // Temperature distribution chart
-        new Chart(document.getElementById('tempChart'), {{
-            type: 'bar',
-            data: {{
-                labels: {temp_labels:?},
-                datasets: [{{
-                    label: 'Count',
-                    data: {temp_values:?},
-                    backgroundColor: 'rgba(233, 30, 99, 0.7)',
-                    borderColor: 'rgba(233, 30, 99, 1)',
-                    borderWidth: 1
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{ display: false }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: (ctx) => `${{ctx.parsed.y.toLocaleString()}} readings`
-                        }}
-                    }}
-                }},
-                scales: {{
-                    x: {{ title: {{ display: true, text: 'Temperature' }} }},
-                    y: {{ title: {{ display: true, text: 'Count' }} }}
-                }}
-            }}
-        }});
+        <div class="panel">
+            <div class="panel-title">Cumulative Delta Distribution</div>
+            <div id="cdfDeltaChart" class="plot"></div>
+        </div>
 
-        // Cumulative delta distribution (CDF)
-        new Chart(document.getElementById('cdfDeltaChart'), {{
-            type: 'line',
-            data: {{
-                labels: {cumulative_delta_labels:?},
-                datasets: [{{
-                    label: 'Cumulative %',
-                    data: {cumulative_delta_values:?},
-                    borderColor: 'rgba(25, 118, 210, 1)',
-                    backgroundColor: 'rgba(25, 118, 210, 0.1)',
-                    fill: true,
-                    tension: 0.1
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{ display: false }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: (ctx) => `${{ctx.parsed.y.toFixed(2)}}% of deltas ≤ ${{ctx.label}}`
-                        }}
-                    }}
-                }},
-                scales: {{
-                    x: {{ title: {{ display: true, text: 'Delta Value' }} }},
-                    y: {{
-                        title: {{ display: true, text: 'Cumulative %' }},
-                        min: 0,
-                        max: 100
-                    }}
-                }}
-            }}
-        }});
+        <div class="panel wide">
+            <div class="panel-title">Encoding Efficiency: Events vs Bits by Tier</div>
+            <div id="efficiencyChart" class="plot" style="height: 450px;"></div>
+        </div>
+    </div>
 
-        // Cumulative zero-run distribution (CDF)
-        new Chart(document.getElementById('cdfZeroRunChart'), {{
-            type: 'line',
-            data: {{
-                labels: {cumulative_zr_labels:?},
-                datasets: [{{
-                    label: 'Cumulative %',
-                    data: {cumulative_zr_values:?},
-                    borderColor: 'rgba(76, 175, 80, 1)',
-                    backgroundColor: 'rgba(76, 175, 80, 0.1)',
-                    fill: true,
-                    tension: 0.1
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{ display: false }},
-                    tooltip: {{
-                        callbacks: {{
-                            label: (ctx) => `${{ctx.parsed.y.toFixed(2)}}% of runs ≤ ${{ctx.label}} zeros`
-                        }}
-                    }}
-                }},
-                scales: {{
-                    x: {{ title: {{ display: true, text: 'Zero-Run Length' }} }},
-                    y: {{
-                        title: {{ display: true, text: 'Cumulative %' }},
-                        min: 0,
-                        max: 100
-                    }}
-                }}
-            }}
-        }});
-    </script>
+    <footer>Generated by nbl-analyze · NibbleRun Time Series Compression</footer>
+</div>
+
+<script>
+const darkLayout = {{
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    font: {{ color: '#7d8590', size: 11 }},
+    margin: {{ l: 50, r: 20, t: 20, b: 40 }},
+    xaxis: {{ gridcolor: '#21262d', zerolinecolor: '#30363d' }},
+    yaxis: {{ gridcolor: '#21262d', zerolinecolor: '#30363d' }},
+    hoverlabel: {{ bgcolor: '#1c2128', bordercolor: '#30363d', font: {{ color: '#e6edf3' }} }}
+}};
+
+const config = {{ displayModeBar: false, responsive: true }};
+
+// Delta distribution with tier coloring
+// Tiers: 0=1bit (green), ±1=3bits (blue), ±2=5bits (light blue), ±3-10=11bits (orange), ±11+=19bits (red)
+const deltaColors = {delta_labels:?}.map(d => {{
+    const v = parseInt(d);
+    if (v === 0) return '#3fb950';      // 1 bit - green
+    if (Math.abs(v) === 1) return '#58a6ff';  // 3 bits - blue
+    if (Math.abs(v) === 2) return '#79c0ff';  // 5 bits - light blue
+    if (Math.abs(v) <= 10) return '#f0883e';  // 11 bits - orange
+    return '#f85149';                    // 19 bits - red
+}});
+Plotly.newPlot('deltaChart', [{{
+    x: {delta_labels:?},
+    y: {delta_values:?},
+    type: 'bar',
+    marker: {{ color: deltaColors }},
+    hovertemplate: 'Delta %{{x}}<br>Count: %{{y:,.0f}}<extra></extra>'
+}}], {{
+    ...darkLayout,
+    yaxis: {{ ...darkLayout.yaxis, type: 'log', title: {{ text: 'Count (log)', font: {{ size: 11 }} }} }},
+    xaxis: {{ ...darkLayout.xaxis, title: {{ text: 'Delta Value', font: {{ size: 11 }} }} }},
+    shapes: [
+        {{ type: 'line', x0: -1.5, x1: -1.5, y0: 0, y1: 1, yref: 'paper', line: {{ color: '#484f58', width: 1, dash: 'dot' }} }},
+        {{ type: 'line', x0: 1.5, x1: 1.5, y0: 0, y1: 1, yref: 'paper', line: {{ color: '#484f58', width: 1, dash: 'dot' }} }},
+        {{ type: 'line', x0: -2.5, x1: -2.5, y0: 0, y1: 1, yref: 'paper', line: {{ color: '#484f58', width: 1, dash: 'dot' }} }},
+        {{ type: 'line', x0: 2.5, x1: 2.5, y0: 0, y1: 1, yref: 'paper', line: {{ color: '#484f58', width: 1, dash: 'dot' }} }},
+        {{ type: 'line', x0: -10.5, x1: -10.5, y0: 0, y1: 1, yref: 'paper', line: {{ color: '#484f58', width: 1, dash: 'dot' }} }},
+        {{ type: 'line', x0: 10.5, x1: 10.5, y0: 0, y1: 1, yref: 'paper', line: {{ color: '#484f58', width: 1, dash: 'dot' }} }}
+    ],
+    annotations: [
+        {{ x: 0, y: 1.02, yref: 'paper', text: '1 bit', showarrow: false, font: {{ size: 9, color: '#3fb950' }} }},
+        {{ x: 1, y: 1.08, yref: 'paper', text: '3 bits', showarrow: false, font: {{ size: 9, color: '#58a6ff' }} }},
+        {{ x: 2, y: 1.02, yref: 'paper', text: '5b', showarrow: false, font: {{ size: 9, color: '#79c0ff' }} }},
+        {{ x: 6, y: 1.08, yref: 'paper', text: '11 bits', showarrow: false, font: {{ size: 9, color: '#f0883e' }} }},
+        {{ x: 13, y: 1.02, yref: 'paper', text: '19 bits', showarrow: false, font: {{ size: 9, color: '#f85149' }} }}
+    ]
+}}, config);
+
+// Bit cost pie
+Plotly.newPlot('bitCostChart', [{{
+    values: [{zero_run_bits}, {pm1_bits}, {pm2_bits}, {tier_3_10_bits}, {tier_11_plus_bits}, {gap_bits}],
+    labels: ['Zero runs', '±1', '±2', '±3-10', '±11+', 'Gaps'],
+    type: 'pie',
+    hole: 0.4,
+    marker: {{ colors: ['#3fb950', '#58a6ff', '#79c0ff', '#a5d6ff', '#f85149', '#a371f7'] }},
+    textinfo: 'percent',
+    textfont: {{ color: '#e6edf3', size: 11 }},
+    hovertemplate: '%{{label}}<br>%{{value:,.0f}} bits<br>%{{percent}}<extra></extra>'
+}}], {{ ...darkLayout, showlegend: true, legend: {{ font: {{ size: 10 }}, x: 1, y: 0.5 }} }}, config);
+
+// Event distribution pie
+Plotly.newPlot('eventChart', [{{
+    values: [{zeros}, {pm1}, {pm2}, {tier_3_10}, {tier_11_plus}, {total_gaps}],
+    labels: ['Zero (δ=0)', '±1', '±2', '±3-10', '±11+', 'Gaps'],
+    type: 'pie',
+    hole: 0.4,
+    marker: {{ colors: ['#3fb950', '#58a6ff', '#79c0ff', '#a5d6ff', '#f85149', '#a371f7'] }},
+    textinfo: 'percent',
+    textfont: {{ color: '#e6edf3', size: 11 }},
+    hovertemplate: '%{{label}}<br>%{{value:,.0f}} events<br>%{{percent}}<extra></extra>'
+}}], {{ ...darkLayout, showlegend: true, legend: {{ font: {{ size: 10 }}, x: 1, y: 0.5 }} }}, config);
+
+// Zero-run distribution with tier coloring
+// Tiers: 1-7=individual bits, 8-21=9bits, 22-149=13bits, 150+=multiple 13-bit
+const zrColors = {zr_labels:?}.map(d => {{
+    const v = parseInt(d);
+    if (v <= 7) return '#3fb950';       // 1-7: individual bits (most efficient)
+    if (v <= 21) return '#58a6ff';      // 8-21: 9 bits
+    if (v <= 149) return '#f0883e';     // 22-149: 13 bits
+    return '#f85149';                    // 150+: multiple chunks
+}});
+Plotly.newPlot('zeroRunChart', [{{
+    x: {zr_labels:?},
+    y: {zr_values:?},
+    type: 'bar',
+    marker: {{ color: zrColors }},
+    hovertemplate: 'Run length %{{x}}<br>Count: %{{y:,.0f}}<extra></extra>'
+}}], {{
+    ...darkLayout,
+    yaxis: {{ ...darkLayout.yaxis, type: 'log', title: {{ text: 'Count (log)', font: {{ size: 11 }} }} }},
+    xaxis: {{ ...darkLayout.xaxis, title: {{ text: 'Run Length', font: {{ size: 11 }} }}, dtick: 20 }},
+    shapes: [
+        {{ type: 'line', x0: 7.5, x1: 7.5, y0: 0, y1: 1, yref: 'paper', line: {{ color: '#58a6ff', width: 2, dash: 'dash' }} }},
+        {{ type: 'line', x0: 21.5, x1: 21.5, y0: 0, y1: 1, yref: 'paper', line: {{ color: '#f0883e', width: 2, dash: 'dash' }} }},
+        {{ type: 'line', x0: 149.5, x1: 149.5, y0: 0, y1: 1, yref: 'paper', line: {{ color: '#f85149', width: 2, dash: 'dash' }} }}
+    ],
+    annotations: [
+        {{ x: 4, y: 1.05, yref: 'paper', text: '1-7: n bits each', showarrow: false, font: {{ size: 10, color: '#3fb950' }} }},
+        {{ x: 14, y: 1.05, yref: 'paper', text: '8-21: 9 bits', showarrow: false, font: {{ size: 10, color: '#58a6ff' }} }},
+        {{ x: 85, y: 1.05, yref: 'paper', text: '22-149: 13 bits', showarrow: false, font: {{ size: 10, color: '#f0883e' }} }},
+        {{ x: 155, y: 1.05, yref: 'paper', text: '150+', showarrow: false, font: {{ size: 10, color: '#f85149' }} }}
+    ]
+}}, config);
+
+// Temperature distribution
+Plotly.newPlot('tempChart', [{{
+    x: {temp_labels:?},
+    y: {temp_values:?},
+    type: 'bar',
+    marker: {{ color: '#f78166' }},
+    hovertemplate: '%{{x}}<br>Count: %{{y:,.0f}}<extra></extra>'
+}}], {{
+    ...darkLayout,
+    xaxis: {{ ...darkLayout.xaxis, title: {{ text: 'Temperature', font: {{ size: 11 }} }} }},
+    yaxis: {{ ...darkLayout.yaxis, title: {{ text: 'Count', font: {{ size: 11 }} }} }}
+}}, config);
+
+// Gap distribution with tier coloring
+// Tiers: 1=3bits (single gap), 2-65=14bits, 66+=multiple 14-bit chunks
+const gapColors = {gap_labels:?}.map(d => {{
+    const v = parseInt(d);
+    if (v === 1) return '#3fb950';       // 1: 3 bits (optimized single gap)
+    if (v <= 65) return '#a371f7';       // 2-65: 14 bits
+    return '#f85149';                     // 66+: multiple chunks
+}});
+Plotly.newPlot('gapChart', [{{
+    x: {gap_labels:?},
+    y: {gap_values:?},
+    type: 'bar',
+    marker: {{ color: gapColors }},
+    hovertemplate: '%{{x}} intervals<br>Count: %{{y:,.0f}}<extra></extra>'
+}}], {{
+    ...darkLayout,
+    yaxis: {{ ...darkLayout.yaxis, type: 'log', title: {{ text: 'Count (log)', font: {{ size: 11 }} }} }},
+    xaxis: {{ ...darkLayout.xaxis, title: {{ text: 'Gap Size (intervals)', font: {{ size: 11 }} }}, dtick: 10 }},
+    shapes: [
+        {{ type: 'line', x0: 1.5, x1: 1.5, y0: 0, y1: 1, yref: 'paper', line: {{ color: '#a371f7', width: 2, dash: 'dash' }} }},
+        {{ type: 'line', x0: 65.5, x1: 65.5, y0: 0, y1: 1, yref: 'paper', line: {{ color: '#f85149', width: 2, dash: 'dash' }} }}
+    ],
+    annotations: [
+        {{ x: 1, y: 1.05, yref: 'paper', text: '1: 3 bits', showarrow: false, font: {{ size: 10, color: '#3fb950' }} }},
+        {{ x: 33, y: 1.05, yref: 'paper', text: '2-65: 14 bits', showarrow: false, font: {{ size: 10, color: '#a371f7' }} }},
+        {{ x: 68, y: 1.05, yref: 'paper', text: '66+', showarrow: false, font: {{ size: 10, color: '#f85149' }} }}
+    ]
+}}, config);
+
+// CDF
+Plotly.newPlot('cdfDeltaChart', [{{
+    x: {cumulative_delta_labels:?},
+    y: {cumulative_delta_values:?},
+    type: 'scatter',
+    mode: 'lines',
+    fill: 'tozeroy',
+    line: {{ color: '#58a6ff', width: 2 }},
+    fillcolor: 'rgba(88, 166, 255, 0.1)',
+    hovertemplate: 'δ ≤ %{{x}}<br>%{{y:.1f}}% of deltas<extra></extra>'
+}}], {{
+    ...darkLayout,
+    xaxis: {{ ...darkLayout.xaxis, title: {{ text: 'Delta Value', font: {{ size: 11 }} }} }},
+    yaxis: {{ ...darkLayout.yaxis, title: {{ text: 'Cumulative %', font: {{ size: 11 }} }}, range: [0, 100] }}
+}}, config);
+
+// Combined Efficiency Chart - Events % vs Bits % for each tier
+const tiers = [
+    {{ name: 'δ=0 (RLE)', events: {zeros}, bits: {zero_run_bits}, color: '#3fb950', bpv: ({zero_run_bits}/{zeros}).toFixed(2) }},
+    {{ name: 'δ=±1 (3 bits)', events: {pm1}, bits: {pm1_bits}, color: '#58a6ff', bpv: '3.00' }},
+    {{ name: 'δ=±2 (5 bits)', events: {pm2}, bits: {pm2_bits}, color: '#79c0ff', bpv: '5.00' }},
+    {{ name: 'δ=±3-10 (11 bits)', events: {tier_3_10}, bits: {tier_3_10_bits}, color: '#f0883e', bpv: '11.00' }},
+    {{ name: 'δ=±11+ (19 bits)', events: {tier_11_plus}, bits: {tier_11_plus_bits}, color: '#f85149', bpv: '19.00' }},
+    {{ name: 'Gap single (3 bits)', events: {single_gaps_count}, bits: {single_gaps_count} * 3, color: '#a371f7', bpv: '3.00' }},
+    {{ name: 'Gap 2-65 (14 bits)', events: {multi_gaps_count}, bits: {multi_gaps_count} * 14, color: '#d2a8ff', bpv: '14.00' }}
+];
+
+const totalEvents = tiers.reduce((sum, t) => sum + t.events, 0);
+const totalBits = tiers.reduce((sum, t) => sum + t.bits, 0);
+
+const eventPcts = tiers.map(t => t.events / totalEvents * 100);
+const bitPcts = tiers.map(t => t.bits / totalBits * 100);
+
+Plotly.newPlot('efficiencyChart', [
+    {{
+        y: tiers.map(t => t.name),
+        x: eventPcts,
+        name: 'Events %',
+        type: 'bar',
+        orientation: 'h',
+        marker: {{ color: tiers.map(t => t.color) }},
+        text: eventPcts.map(p => p >= 0.5 ? p.toFixed(1) + '%' : ''),
+        textposition: 'inside',
+        textfont: {{ color: '#fff', size: 11 }},
+        hovertemplate: '%{{y}}<br>Events: %{{x:.2f}}%<br>Count: %{{customdata:,.0f}}<extra></extra>',
+        customdata: tiers.map(t => t.events)
+    }},
+    {{
+        y: tiers.map(t => t.name),
+        x: bitPcts,
+        name: 'Bits %',
+        type: 'bar',
+        orientation: 'h',
+        marker: {{ color: tiers.map(t => t.color + '66'), pattern: {{ shape: '/' }} }},
+        text: bitPcts.map(p => p >= 0.5 ? p.toFixed(1) + '%' : ''),
+        textposition: 'inside',
+        textfont: {{ color: '#e6edf3', size: 11 }},
+        hovertemplate: '%{{y}}<br>Bits: %{{x:.2f}}%<br>Bits/value: %{{customdata}}<extra></extra>',
+        customdata: tiers.map(t => t.bpv)
+    }}
+], {{
+    ...darkLayout,
+    barmode: 'group',
+    bargap: 0.2,
+    bargroupgap: 0.1,
+    margin: {{ l: 140, r: 30, t: 40, b: 50 }},
+    xaxis: {{
+        ...darkLayout.xaxis,
+        title: {{ text: 'Percentage', font: {{ size: 11 }} }},
+        range: [0, 100],
+        ticksuffix: '%'
+    }},
+    yaxis: {{ ...darkLayout.yaxis }},
+    showlegend: true,
+    legend: {{ x: 0.75, y: 1.15, orientation: 'h', font: {{ size: 11 }} }},
+    title: {{ text: 'Solid = % of events, Striped = % of bits (wider solid bar = more efficient)', font: {{ size: 11, color: '#7d8590' }}, y: 0.98 }}
+}}, config);
+</script>
 </body>
 </html>
 "##,
             files = format_num(self.files_processed),
             readings = format_num(self.total_readings),
-            compression_ratio = self.raw_input_bytes as f64 / self.actual_compressed_bytes as f64,
+            compression_ratio = actual_ratio,
+            raw_mb = raw_mb,
+            compressed_mb = compressed_mb,
             zero_pct = 100.0 * zeros as f64 / total,
             temp_range = format!("{}°C to {}°C", self.min_temp, self.max_temp),
-            total_bytes = format_num(self.actual_compressed_bytes),
             delta_labels = delta_labels,
             delta_values = delta_values,
             zero_run_bits = zero_run_bits,
@@ -1148,7 +1089,6 @@ impl Stats {
             tier_3_10_bits = tier_3_10_bits,
             tier_11_plus_bits = tier_11_plus_bits,
             gap_bits = gap_bits,
-            total_bits = total_bits,
             zr_labels = zr_labels,
             zr_values = zr_values,
             zeros = zeros,
@@ -1157,15 +1097,15 @@ impl Stats {
             tier_3_10 = tier_3_10,
             tier_11_plus = tier_11_plus,
             total_gaps = total_gaps,
-            total_events = self.total_readings + total_gaps,
             gap_labels = gap_labels,
             gap_values = gap_values,
             temp_labels = temp_labels,
             temp_values = temp_values,
             cumulative_delta_labels = cumulative_delta_labels,
             cumulative_delta_values = cumulative_delta_values,
-            cumulative_zr_labels = cumulative_zr_labels,
-            cumulative_zr_values = cumulative_zr_values,
+            // Efficiency chart data
+            single_gaps_count = single_gaps_count,
+            multi_gaps_count = multi_gaps_count,
         )?;
 
         Ok(())
