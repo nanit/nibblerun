@@ -15,7 +15,7 @@ use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "nbl-analyze")]
-#[command(about = "Analyze temperature sensor data for encoding optimization")]
+#[command(about = "Analyze sensor data for encoding optimization")]
 struct Args {
     /// Directory containing CSV files
     dir: PathBuf,
@@ -35,6 +35,10 @@ struct Args {
     /// Output HTML report with interactive charts
     #[arg(long)]
     html: Option<PathBuf>,
+
+    /// Label for the data type (e.g., "temperature", "humidity")
+    #[arg(short, long, default_value = "temperature")]
+    label: String,
 }
 
 #[derive(Default)]
@@ -47,17 +51,21 @@ struct Stats {
     zero_run_lengths: HashMap<u32, u64>,
     // Gap counts (number of intervals skipped)
     gap_counts: HashMap<u32, u64>,
-    // Temperature distribution
-    temp_counts: HashMap<i32, u64>,
+    // Value distribution (temperature, humidity, etc.)
+    value_counts: HashMap<i32, u64>,
     max_zero_run: u32,
     max_delta: i32,
     min_delta: i32,
-    // Temperature range
-    max_temp: i32,
-    min_temp: i32,
+    // Value range
+    max_value: i32,
+    min_value: i32,
     // Actual compression stats
     actual_compressed_bytes: u64,
     raw_input_bytes: u64,
+    // Data type label
+    label: String,
+    // Per-file compression ratios for distribution analysis
+    compression_ratios: Vec<f32>,
 }
 
 impl Stats {
@@ -77,22 +85,27 @@ impl Stats {
             *self.gap_counts.entry(*k).or_insert(0) += v;
         }
 
-        for (k, v) in &other.temp_counts {
-            *self.temp_counts.entry(*k).or_insert(0) += v;
+        for (k, v) in &other.value_counts {
+            *self.value_counts.entry(*k).or_insert(0) += v;
         }
 
         self.max_zero_run = self.max_zero_run.max(other.max_zero_run);
         self.max_delta = self.max_delta.max(other.max_delta);
         self.min_delta = self.min_delta.min(other.min_delta);
-        self.max_temp = self.max_temp.max(other.max_temp);
-        self.min_temp = self.min_temp.min(other.min_temp);
+        self.max_value = self.max_value.max(other.max_value);
+        self.min_value = self.min_value.min(other.min_value);
         self.actual_compressed_bytes += other.actual_compressed_bytes;
         self.raw_input_bytes += other.raw_input_bytes;
+        self.compression_ratios.extend(&other.compression_ratios);
     }
 
     fn print_report(&self) {
+        let label_upper = self.label.to_uppercase();
+        let label_title = format!("{}{}", &self.label[..1].to_uppercase(), &self.label[1..]);
+        let unit = if self.label == "temperature" { "°C" } else if self.label == "humidity" { "%" } else { "" };
+
         println!("\n{}", "=".repeat(70));
-        println!("DELTA FREQUENCY ANALYSIS");
+        println!("{} DELTA FREQUENCY ANALYSIS", label_upper);
         println!("{}", "=".repeat(70));
         println!();
         println!(
@@ -101,8 +114,8 @@ impl Stats {
             format_num(self.total_readings)
         );
         println!(
-            "Temperature range: {}°C to {}°C",
-            self.min_temp, self.max_temp
+            "{} range: {}{} to {}{}",
+            label_title, self.min_value, unit, self.max_value, unit
         );
         println!("Delta range: {} to {}", self.min_delta, self.max_delta);
         println!();
@@ -656,14 +669,15 @@ impl Stats {
             gap_values.push(*self.gap_counts.get(&g).unwrap_or(&0));
         }
 
-        // Temperature distribution (use actual range from data)
-        let temp_min = self.min_temp.max(-50); // Clamp for display
-        let temp_max = self.max_temp.min(100);
-        let mut temp_labels = Vec::new();
-        let mut temp_values = Vec::new();
-        for t in temp_min..=temp_max {
-            temp_labels.push(format!("{}°", t));
-            temp_values.push(*self.temp_counts.get(&t).unwrap_or(&0));
+        // Value distribution (use actual range from data)
+        let value_min = self.min_value.max(-50); // Clamp for display
+        let value_max = self.max_value.min(100);
+        let unit = if self.label == "temperature" { "°" } else if self.label == "humidity" { "%" } else { "" };
+        let mut value_labels = Vec::new();
+        let mut value_values = Vec::new();
+        for v in value_min..=value_max {
+            value_labels.push(format!("{}{}", v, unit));
+            value_values.push(*self.value_counts.get(&v).unwrap_or(&0));
         }
 
         // Cumulative delta distribution (for CDF chart)
@@ -695,13 +709,58 @@ impl Stats {
         let actual_ratio = self.raw_input_bytes as f64 / self.actual_compressed_bytes as f64;
         let raw_mb = self.raw_input_bytes as f64 / 1_000_000.0;
         let compressed_mb = self.actual_compressed_bytes as f64 / 1_000_000.0;
+        let label_title = format!("{}{}", &self.label[..1].to_uppercase(), &self.label[1..]);
+        let unit_full = if self.label == "temperature" { "°C" } else if self.label == "humidity" { "%" } else { "" };
+
+        // Compression ratio distribution
+        let mut sorted_ratios = self.compression_ratios.clone();
+        sorted_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let percentile = |p: usize| -> f32 {
+            if sorted_ratios.is_empty() { return 0.0; }
+            let idx = (p * sorted_ratios.len() / 100).min(sorted_ratios.len() - 1);
+            sorted_ratios[idx]
+        };
+
+        let p1 = percentile(1);
+        let p5 = percentile(5);
+        let p10 = percentile(10);
+        let p25 = percentile(25);
+        let p50 = percentile(50);
+        let p75 = percentile(75);
+        let p90 = percentile(90);
+        let p95 = percentile(95);
+        let p99 = percentile(99);
+        let min_ratio = sorted_ratios.first().copied().unwrap_or(0.0);
+        let max_ratio = sorted_ratios.last().copied().unwrap_or(0.0);
+
+        // Create histogram buckets for compression ratio
+        let bucket_size = 5.0_f32; // 5x per bucket
+        let min_bucket = (min_ratio / bucket_size).floor() * bucket_size;
+        let max_bucket = (max_ratio / bucket_size).ceil() * bucket_size;
+        let num_buckets = ((max_bucket - min_bucket) / bucket_size).ceil() as usize + 1;
+
+        let mut histogram_labels: Vec<String> = Vec::new();
+        let mut histogram_values: Vec<u64> = vec![0; num_buckets];
+
+        for i in 0..num_buckets {
+            let bucket_start = min_bucket + (i as f32 * bucket_size);
+            histogram_labels.push(format!("{:.0}x", bucket_start));
+        }
+
+        for &ratio in &sorted_ratios {
+            let bucket_idx = ((ratio - min_bucket) / bucket_size).floor() as usize;
+            if bucket_idx < histogram_values.len() {
+                histogram_values[bucket_idx] += 1;
+            }
+        }
 
         write!(file, r##"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NibbleRun Compression Analysis</title>
+    <title>NibbleRun {label_title} Analysis</title>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -773,7 +832,7 @@ impl Stats {
 <body>
 <div class="container">
     <header>
-        <h1>NibbleRun Compression Analysis</h1>
+        <h1>NibbleRun {label_title} Analysis</h1>
         <p class="subtitle">{files} sensor files · {readings} total readings</p>
     </header>
 
@@ -795,8 +854,8 @@ impl Stats {
             <div class="metric-label">Zero Deltas</div>
         </div>
         <div class="metric">
-            <div class="metric-value">{temp_range}</div>
-            <div class="metric-label">Temp Range</div>
+            <div class="metric-value">{value_range}</div>
+            <div class="metric-label">{label_title} Range</div>
         </div>
     </div>
 
@@ -822,8 +881,8 @@ impl Stats {
         </div>
 
         <div class="panel wide">
-            <div class="panel-title">Temperature Distribution</div>
-            <div id="tempChart" class="plot"></div>
+            <div class="panel-title">{label_title} Distribution</div>
+            <div id="valueChart" class="plot"></div>
         </div>
 
         <div class="panel wide">
@@ -839,6 +898,16 @@ impl Stats {
         <div class="panel wide">
             <div class="panel-title">Encoding Efficiency: Events vs Bits by Tier</div>
             <div id="efficiencyChart" class="plot" style="height: 450px;"></div>
+        </div>
+
+        <div class="panel wide">
+            <div class="panel-title">Compression Ratio Distribution (per file)</div>
+            <div id="compressionDistChart" class="plot"></div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-title">Compression Percentiles</div>
+            <div id="percentilesChart" class="plot"></div>
         </div>
     </div>
 
@@ -951,16 +1020,16 @@ Plotly.newPlot('zeroRunChart', [{{
     ]
 }}, config);
 
-// Temperature distribution
-Plotly.newPlot('tempChart', [{{
-    x: {temp_labels:?},
-    y: {temp_values:?},
+// Value distribution
+Plotly.newPlot('valueChart', [{{
+    x: {value_labels:?},
+    y: {value_values:?},
     type: 'bar',
     marker: {{ color: '#f78166' }},
     hovertemplate: '%{{x}}<br>Count: %{{y:,.0f}}<extra></extra>'
 }}], {{
     ...darkLayout,
-    xaxis: {{ ...darkLayout.xaxis, title: {{ text: 'Temperature', font: {{ size: 11 }} }} }},
+    xaxis: {{ ...darkLayout.xaxis, title: {{ text: '{label_title}', font: {{ size: 11 }} }} }},
     yaxis: {{ ...darkLayout.yaxis, title: {{ text: 'Count', font: {{ size: 11 }} }} }}
 }}, config);
 
@@ -1070,6 +1139,45 @@ Plotly.newPlot('efficiencyChart', [
     legend: {{ x: 0.75, y: 1.15, orientation: 'h', font: {{ size: 11 }} }},
     title: {{ text: 'Solid = % of events, Striped = % of bits (wider solid bar = more efficient)', font: {{ size: 11, color: '#7d8590' }}, y: 0.98 }}
 }}, config);
+
+// Compression ratio distribution histogram
+Plotly.newPlot('compressionDistChart', [{{
+    x: {histogram_labels:?},
+    y: {histogram_values:?},
+    type: 'bar',
+    marker: {{ color: '#3fb950' }},
+    hovertemplate: '%{{x}}<br>Files: %{{y:,.0f}}<extra></extra>'
+}}], {{
+    ...darkLayout,
+    xaxis: {{ ...darkLayout.xaxis, title: {{ text: 'Compression Ratio', font: {{ size: 11 }} }} }},
+    yaxis: {{ ...darkLayout.yaxis, title: {{ text: 'Number of Files', font: {{ size: 11 }} }} }},
+    shapes: [
+        {{ type: 'line', x0: '{p50:.0}x', x1: '{p50:.0}x', y0: 0, y1: 1, yref: 'paper', line: {{ color: '#58a6ff', width: 2, dash: 'dash' }} }}
+    ],
+    annotations: [
+        {{ x: '{p50:.0}x', y: 1.05, yref: 'paper', text: 'Median: {p50:.1}x', showarrow: false, font: {{ size: 10, color: '#58a6ff' }} }}
+    ]
+}}, config);
+
+// Percentiles chart
+Plotly.newPlot('percentilesChart', [{{
+    x: ['p1', 'p5', 'p10', 'p25', 'p50', 'p75', 'p90', 'p95', 'p99'],
+    y: [{p1:.1}, {p5:.1}, {p10:.1}, {p25:.1}, {p50:.1}, {p75:.1}, {p90:.1}, {p95:.1}, {p99:.1}],
+    type: 'scatter',
+    mode: 'lines+markers',
+    line: {{ color: '#58a6ff', width: 2 }},
+    marker: {{ size: 8, color: '#58a6ff' }},
+    hovertemplate: '%{{x}}: %{{y:.1f}}x<extra></extra>'
+}}], {{
+    ...darkLayout,
+    xaxis: {{ ...darkLayout.xaxis, title: {{ text: 'Percentile', font: {{ size: 11 }} }} }},
+    yaxis: {{ ...darkLayout.yaxis, title: {{ text: 'Compression Ratio', font: {{ size: 11 }} }} }},
+    annotations: [
+        {{ x: 'p50', y: {p50:.1}, text: '  {p50:.1}x (median)', showarrow: false, xanchor: 'left', font: {{ size: 10, color: '#3fb950' }} }},
+        {{ x: 'p1', y: {p1:.1}, text: '  {p1:.1}x (worst 1%)', showarrow: false, xanchor: 'left', font: {{ size: 10, color: '#f85149' }} }},
+        {{ x: 'p99', y: {p99:.1}, text: '{p99:.1}x (best 1%)  ', showarrow: false, xanchor: 'right', font: {{ size: 10, color: '#3fb950' }} }}
+    ]
+}}, config);
 </script>
 </body>
 </html>
@@ -1080,7 +1188,8 @@ Plotly.newPlot('efficiencyChart', [
             raw_mb = raw_mb,
             compressed_mb = compressed_mb,
             zero_pct = 100.0 * zeros as f64 / total,
-            temp_range = format!("{}°C to {}°C", self.min_temp, self.max_temp),
+            value_range = format!("{}{} to {}{}", self.min_value, unit_full, self.max_value, unit_full),
+            label_title = label_title,
             delta_labels = delta_labels,
             delta_values = delta_values,
             zero_run_bits = zero_run_bits,
@@ -1099,13 +1208,25 @@ Plotly.newPlot('efficiencyChart', [
             total_gaps = total_gaps,
             gap_labels = gap_labels,
             gap_values = gap_values,
-            temp_labels = temp_labels,
-            temp_values = temp_values,
+            value_labels = value_labels,
+            value_values = value_values,
             cumulative_delta_labels = cumulative_delta_labels,
             cumulative_delta_values = cumulative_delta_values,
             // Efficiency chart data
             single_gaps_count = single_gaps_count,
             multi_gaps_count = multi_gaps_count,
+            // Compression distribution data
+            histogram_labels = histogram_labels,
+            histogram_values = histogram_values,
+            p1 = p1,
+            p5 = p5,
+            p10 = p10,
+            p25 = p25,
+            p50 = p50,
+            p75 = p75,
+            p90 = p90,
+            p95 = p95,
+            p99 = p99,
         )?;
 
         Ok(())
@@ -1129,8 +1250,8 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
     let reader = BufReader::new(file);
 
     let mut stats = Stats {
-        min_temp: i32::MAX,
-        max_temp: i32::MIN,
+        min_value: i32::MAX,
+        max_value: i32::MIN,
         min_delta: i32::MAX,
         max_delta: i32::MIN,
         ..Default::default()
@@ -1183,9 +1304,9 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
         readings.push((ts, temp));
 
         stats.total_readings += 1;
-        stats.max_temp = stats.max_temp.max(temp);
-        stats.min_temp = stats.min_temp.min(temp);
-        *stats.temp_counts.entry(temp).or_insert(0) += 1;
+        stats.max_value = stats.max_value.max(temp);
+        stats.min_value = stats.min_value.min(temp);
+        *stats.value_counts.entry(temp).or_insert(0) += 1;
 
         if let Some(pt) = prev_temp {
             let delta = temp - pt;
@@ -1240,6 +1361,11 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
         stats.actual_compressed_bytes = compressed.len() as u64;
         // Raw size: 8 bytes timestamp + 4 bytes i32 temp per reading
         stats.raw_input_bytes = (readings.len() * 12) as u64;
+        // Track per-file compression ratio
+        if !compressed.is_empty() {
+            let ratio = stats.raw_input_bytes as f32 / compressed.len() as f32;
+            stats.compression_ratios.push(ratio);
+        }
     }
 
     stats.files_processed = 1;
@@ -1274,10 +1400,11 @@ fn main() {
     let start = Instant::now();
     let processed = AtomicU64::new(0);
     let global_stats = Mutex::new(Stats {
-        min_temp: i32::MAX,
-        max_temp: i32::MIN,
+        min_value: i32::MAX,
+        max_value: i32::MIN,
         min_delta: i32::MAX,
         max_delta: i32::MIN,
+        label: args.label.clone(),
         ..Default::default()
     });
 
