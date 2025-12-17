@@ -7,10 +7,9 @@ use crate::value::Value;
 /// Push multiple readings with the same value (zero-run decoding)
 /// Optimized to avoid per-iteration bounds checks and use running timestamp
 #[inline]
-fn push_zero_run<V: Value>(
+fn push_zero_run<V: Value, const INTERVAL: u16>(
     decoded: &mut Vec<Reading<V>>,
     count: usize,
-    interval: u64,
     temp: V,
     ts: &mut u64,
     run_len: u32,
@@ -22,6 +21,7 @@ fn push_zero_run<V: Value>(
     // Reserve capacity once
     decoded.reserve(actual_len);
 
+    let interval = u64::from(INTERVAL);
     // Push without per-iteration capacity checks
     for _ in 0..actual_len {
         decoded.push(Reading {
@@ -36,16 +36,17 @@ fn push_zero_run<V: Value>(
 ///
 /// # Type Parameters
 /// * `V` - Value type (i8, i16, or i32). Must match the type used during encoding.
+/// * `INTERVAL` - The interval in seconds (must match encoder's interval)
 ///
 /// # Arguments
 /// * `bytes` - Encoded bytes from `Encoder::to_bytes()`
-/// * `interval` - The interval in seconds used when encoding (must match encoder's interval)
 ///
 /// # Returns
 /// Vector of decoded readings. Returns an empty vector if bytes is too short
 /// or contains no readings.
 #[must_use]
-pub fn decode<V: Value>(bytes: &[u8], interval: u64) -> Vec<Reading<V>> {
+pub fn decode<V: Value, const INTERVAL: u16>(bytes: &[u8]) -> Vec<Reading<V>> {
+    let interval = u64::from(INTERVAL);
     let header_size = 4 + 2 + V::BYTES; // base_ts_offset + count + first_value
 
     if bytes.len() < header_size {
@@ -129,13 +130,13 @@ pub fn decode<V: Value>(bytes: &[u8], interval: u64) -> Vec<Reading<V>> {
         // 1111...
         if reader.read_bits(1) == 0 {
             // 11110xxxx = zero run 8-21
-            push_zero_run(&mut decoded, count, interval, V::from_i32(prev_temp), &mut ts, reader.read_bits(4) + 8);
+            push_zero_run::<V, INTERVAL>(&mut decoded, count, V::from_i32(prev_temp), &mut ts, reader.read_bits(4) + 8);
             continue;
         }
         // 11111...
         if reader.read_bits(1) == 0 {
             // 111110xxxxxxx = zero run 22-149
-            push_zero_run(&mut decoded, count, interval, V::from_i32(prev_temp), &mut ts, reader.read_bits(7) + 22);
+            push_zero_run::<V, INTERVAL>(&mut decoded, count, V::from_i32(prev_temp), &mut ts, reader.read_bits(7) + 22);
             continue;
         }
         // 111111...

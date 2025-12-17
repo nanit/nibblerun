@@ -3,15 +3,14 @@
 use libfuzzer_sys::fuzz_target;
 use nibblerun::Encoder;
 
+const INTERVAL: u16 = 300;
+
 fuzz_target!(|data: &[u8]| {
-    // Need at least 2 bytes for interval + some data
-    if data.len() < 4 {
+    if data.len() < 2 {
         return;
     }
 
-    // First 2 bytes determine interval (1-65535)
-    let interval = u16::from_le_bytes([data[0], data[1]]).max(1);
-    let mut enc: Encoder<i32> = Encoder::new(interval);
+    let mut enc: Encoder<i32, INTERVAL> = Encoder::new();
     let base_ts = 1_760_000_000u64;
 
     // Track input (interval_idx, temp) pairs
@@ -21,7 +20,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Each 2 bytes: (gap, temp)
     // gap determines how many intervals to skip (0 = consecutive)
-    for chunk in data[2..].chunks(2) {
+    for chunk in data.chunks(2) {
         if chunk.len() < 2 {
             break;
         }
@@ -41,7 +40,7 @@ fuzz_target!(|data: &[u8]| {
         current_interval = current_interval.saturating_add(gap);
 
         // Timestamp exactly at interval boundary
-        let ts = base_ts + current_interval * (interval as u64);
+        let ts = base_ts + current_interval * u64::from(INTERVAL);
 
         if enc.append(ts, temp).is_ok() {
             inputs.push((current_interval, temp));
@@ -70,7 +69,7 @@ fuzz_target!(|data: &[u8]| {
         );
 
         // Verify timestamp is exactly at the expected interval boundary
-        let expected_ts = base_ts + expected_interval * (interval as u64);
+        let expected_ts = base_ts + expected_interval * u64::from(INTERVAL);
         assert_eq!(
             reading.ts, expected_ts,
             "Timestamp mismatch: expected {} (interval {}), got {}",

@@ -3,19 +3,18 @@
 use libfuzzer_sys::fuzz_target;
 use nibblerun::Encoder;
 
+const INTERVAL: u16 = 300;
+
 fuzz_target!(|data: &[u8]| {
-    // Need at least 2 bytes for interval + some data
-    if data.len() < 3 {
+    if data.is_empty() {
         return;
     }
 
-    // First 2 bytes determine interval (1-65535)
-    let interval = u16::from_le_bytes([data[0], data[1]]).max(1);
-    let mut enc: Encoder<i32> = Encoder::new(interval);
+    let mut enc: Encoder<i32, INTERVAL> = Encoder::new();
     let mut ts = 1_760_000_000u64;
 
-    // Remaining bytes are interpreted as (ts_delta: u16, temp: i8) tuples
-    for chunk in data[2..].chunks(3) {
+    // Bytes are interpreted as (ts_delta: u16, temp: i8) tuples
+    for chunk in data.chunks(3) {
         if chunk.len() < 3 {
             break;
         }

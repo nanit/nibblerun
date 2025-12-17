@@ -1214,7 +1214,7 @@ fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), Str
     let file = File::open(path).map_err(|e| format!("Failed to open CSV: {e}"))?;
     let reader = BufReader::new(file);
 
-    let mut encoder: Encoder<i8> = Encoder::new(DEFAULT_INTERVAL);
+    let mut encoder: Encoder<i8, DEFAULT_INTERVAL> = Encoder::new();
     let mut original_readings = Vec::new();
     let mut line_num = 0;
 

@@ -3,19 +3,18 @@
 use libfuzzer_sys::fuzz_target;
 use nibblerun::{decode, Encoder};
 
+const INTERVAL: u16 = 300;
+
 fuzz_target!(|data: &[u8]| {
-    // Need at least 2 bytes for interval + some data
-    if data.len() < 3 {
+    if data.is_empty() {
         return;
     }
 
-    // First 2 bytes determine interval (1-65535)
-    let interval = u16::from_le_bytes([data[0], data[1]]).max(1);
-    let mut enc: Encoder<i32> = Encoder::new(interval);
+    let mut enc: Encoder<i32, INTERVAL> = Encoder::new();
     let mut ts = 1_760_000_000u64;
 
-    // Remaining bytes are interpreted as (ts_delta: u16, temp: i8) tuples
-    for chunk in data[2..].chunks(3) {
+    // Bytes are interpreted as (ts_delta: u16, temp: i8) tuples
+    for chunk in data.chunks(3) {
         if chunk.len() < 3 {
             break;
         }
@@ -31,7 +30,7 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(enc.size(), bytes.len(), "size mismatch");
 
     // Property 2: count() == decode().len()
-    let decoded = decode::<i32>(&bytes, u64::from(interval));
+    let decoded = decode::<i32, INTERVAL>(&bytes);
     assert_eq!(enc.count(), decoded.len(), "count mismatch");
 
     // Property 3: direct decode equals decode via bytes
@@ -52,7 +51,7 @@ fuzz_target!(|data: &[u8]| {
         let base = first.ts;
         for reading in &decoded {
             let offset = reading.ts - base;
-            assert_eq!(offset % (interval as u64), 0, "timestamp not aligned");
+            assert_eq!(offset % u64::from(INTERVAL), 0, "timestamp not aligned");
         }
     }
 });

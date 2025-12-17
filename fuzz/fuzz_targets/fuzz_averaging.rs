@@ -4,15 +4,14 @@ use libfuzzer_sys::fuzz_target;
 use nibblerun::Encoder;
 use std::collections::BTreeMap;
 
+const INTERVAL: u16 = 300;
+
 fuzz_target!(|data: &[u8]| {
-    // Need at least 2 bytes for interval + some data
-    if data.len() < 5 {
+    if data.len() < 3 {
         return;
     }
 
-    // First 2 bytes determine interval (use larger interval so multiple readings fit)
-    let interval = (u16::from_le_bytes([data[0], data[1]]).max(100) as u64).max(100);
-    let mut enc: Encoder<i32> = Encoder::new(interval as u16);
+    let mut enc: Encoder<i32, INTERVAL> = Encoder::new();
     let base_ts = 1_760_000_000u64;
 
     // Track readings per interval for expected average calculation
@@ -23,15 +22,15 @@ fuzz_target!(|data: &[u8]| {
 
     // Generate multiple readings per interval
     // Format: each 2 bytes = (offset within interval, temp)
-    for (i, chunk) in data[2..].chunks(2).enumerate() {
+    for (i, chunk) in data.chunks(2).enumerate() {
         if chunk.len() < 2 {
             break;
         }
 
         let interval_idx = i as u64 / 3; // ~3 readings per interval
-        let offset = (chunk[0] as u64) % interval; // offset within interval
+        let offset = (chunk[0] as u64) % u64::from(INTERVAL); // offset within interval
         let temp = chunk[1] as i8 as i32;
-        let ts = base_ts + interval_idx * interval + offset;
+        let ts = base_ts + interval_idx * u64::from(INTERVAL) + offset;
 
         // Check if this would cause delta overflow when finalized
         if let Some(prev) = prev_avg {
@@ -54,7 +53,7 @@ fuzz_target!(|data: &[u8]| {
             }
 
             // Calculate interval index relative to actual base_ts
-            let actual_interval_idx = (ts - actual_base_ts.unwrap()) / interval;
+            let actual_interval_idx = (ts - actual_base_ts.unwrap()) / u64::from(INTERVAL);
 
             let readings = interval_readings.entry(actual_interval_idx).or_default();
             readings.push(temp);
@@ -76,7 +75,7 @@ fuzz_target!(|data: &[u8]| {
     // Property: Each decoded reading should be the average of inputs for that interval
     if let Some(base) = actual_base_ts {
         for reading in &decoded {
-            let interval_idx = (reading.ts - base) / interval;
+            let interval_idx = (reading.ts - base) / u64::from(INTERVAL);
             if let Some(readings) = interval_readings.get(&interval_idx) {
                 if !readings.is_empty() {
                     let sum: i32 = readings.iter().sum();

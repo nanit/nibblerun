@@ -14,9 +14,9 @@ use crate::value::Value;
 /// Encoder for `NibbleRun` format
 ///
 /// Accumulates sensor readings and produces compressed output.
-/// Generic over value type V (i8, i16, or i32) for compile-time type safety.
+/// Generic over value type V (i8, i16, or i32) and interval INTERVAL (compile-time constant).
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Encoder<V: Value> {
+pub struct Encoder<V: Value, const INTERVAL: u16 = 300> {
     /// Packed averaging state: bits 0-9 = `pending_count` (0-1023), bits 10-41 = `pending_sum`
     pending_avg: u64,
     bit_accum: u32,
@@ -28,21 +28,19 @@ pub struct Encoder<V: Value> {
     prev_value: V,
     prev_logical_idx: u32,
     count: u16,
-    interval: u16,
     /// Bit accumulator count (0-63) - separate field for fast access in write_bits
     bit_count: u8,
     #[serde(skip)]
     _marker: PhantomData<V>,
 }
 
-impl<V: Value> Encoder<V> {
-    /// Create a new encoder with the specified interval
+impl<V: Value, const INTERVAL: u16> Encoder<V, INTERVAL> {
+    /// Create a new encoder
     ///
-    /// # Arguments
-    /// * `interval` - Interval between readings in seconds (e.g., 300 for 5 minutes)
+    /// The interval is specified as a const generic parameter (default: 300 seconds).
     #[inline]
     #[must_use]
-    pub fn new(interval: u16) -> Self {
+    pub fn new() -> Self {
         Self {
             bit_accum: 0,
             pending_avg: 0,
@@ -53,7 +51,6 @@ impl<V: Value> Encoder<V> {
             prev_value: V::default(),
             prev_logical_idx: 0,
             count: 0,
-            interval,
             bit_count: 0,
             _marker: PhantomData,
         }
@@ -62,8 +59,8 @@ impl<V: Value> Encoder<V> {
     /// Get the interval in seconds
     #[inline]
     #[must_use]
-    pub const fn interval(&self) -> u16 {
-        self.interval
+    pub const fn interval() -> u16 {
+        INTERVAL
     }
 
     /// Get the base timestamp (reconstructed from offset)
@@ -118,7 +115,7 @@ impl<V: Value> Encoder<V> {
         }
 
         // Calculate logical index (u32 supports ~40,000 years at 300s intervals)
-        let logical_idx = div_by_interval(ts - base_ts, self.interval) as u32;
+        let logical_idx = div_by_interval(ts - base_ts, INTERVAL) as u32;
 
         // Reject readings that go backwards in time
         if logical_idx < self.prev_logical_idx {
@@ -170,7 +167,7 @@ impl<V: Value> Encoder<V> {
         if index_gap > 1 {
             cold_gap_handler();
             self.flush_zeros();
-            self.write_gaps(u32::from(index_gap - 1));
+            self.write_gaps(index_gap - 1);
         }
 
         // Start accumulating for new interval
@@ -420,7 +417,7 @@ impl<V: Value> Encoder<V> {
         let mut idx = 1u64;
         let count = self.count as usize;
 
-        let interval = u64::from(self.interval);
+        let interval = u64::from(INTERVAL);
         // New encoding scheme:
         // 0       = zero delta
         // 100     = +1, 101 = -1
@@ -734,5 +731,11 @@ impl<'a> BitReader<'a> {
     #[inline]
     const fn has_more(&self) -> bool {
         self.left > 0 || self.pos < self.buf.len()
+    }
+}
+
+impl<V: Value, const INTERVAL: u16> Default for Encoder<V, INTERVAL> {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -22,8 +22,8 @@
 //! ```
 //! use nibblerun::{Encoder, decode};
 //!
-//! let interval = 300; // 5 minutes
-//! let mut encoder: Encoder<i32> = Encoder::new(interval);
+//! // Create encoder with 5-minute (300s) intervals (default)
+//! let mut encoder: Encoder<i32> = Encoder::new();
 //! let base_ts = 1_761_000_000_u64;
 //!
 //! // Append sensor readings (timestamp, value)
@@ -35,11 +35,14 @@
 //! let bytes = encoder.to_bytes();
 //! println!("Encoded size: {} bytes", bytes.len());
 //!
-//! // Decode back (same interval and type used for encoding)
-//! let readings = decode::<i32>(&bytes, interval as u64);
+//! // Decode back (same interval and type)
+//! let readings = decode::<i32, 300>(&bytes);
 //! for r in &readings {
 //!     println!("ts={}, value={}", r.ts, r.value);
 //! }
+//!
+//! // Custom interval example (60s = 1 minute)
+//! let mut enc_1min: Encoder<i32, 60> = Encoder::new();
 //! ```
 //!
 //! # Wire Format
@@ -52,7 +55,7 @@
 //! | 4 | 2 | `count` | Total number of readings stored. Used by decoder to know when to stop. |
 //! | 6 | 1/2/4 | `first_value` | First value stored directly (not delta-encoded). Size depends on type: i8=1, i16=2, i32=4. |
 //!
-//! Note: The interval is not stored in the header - it must be provided to the decoder.
+//! Note: The interval is a compile-time const generic parameter, not stored in the wire format.
 //!
 //! ## Bit-Packed Data
 //!
@@ -80,7 +83,7 @@
 //!
 //! ## Pending State Packing
 //!
-//! To keep the `Encoder` struct compact (56-64 bytes depending on value type),
+//! To keep the `Encoder` struct compact (54-62 bytes depending on value type),
 //! multiple values are packed into a single `u64` field (`pending_avg`):
 //! - Bits 0-9: Pending reading count for averaging (0-1023)
 //! - Bits 10-41: Pending sum for averaging (i32 range)

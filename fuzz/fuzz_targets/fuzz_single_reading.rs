@@ -3,25 +3,24 @@
 use libfuzzer_sys::fuzz_target;
 use nibblerun::Encoder;
 
+const INTERVAL: u16 = 300;
+
 fuzz_target!(|data: &[u8]| {
-    // Need at least 2 bytes for interval + some data
-    if data.len() < 5 {
+    if data.is_empty() {
         return;
     }
 
-    // First 2 bytes determine interval (1-65535)
-    let interval = u16::from_le_bytes([data[0], data[1]]).max(1);
-    let mut enc: Encoder<i32> = Encoder::new(interval);
+    let mut enc: Encoder<i32, INTERVAL> = Encoder::new();
     let base_ts = 1_760_000_000u64;
 
     // Generate readings with exactly one per interval
-    // Each byte after interval becomes a temp, spaced by interval
+    // Each byte becomes a temp, spaced by interval
     let mut expected_temps = Vec::new();
     let mut prev_temp: Option<i32> = None;
 
-    for (i, &byte) in data[2..].iter().enumerate() {
+    for (i, &byte) in data.iter().enumerate() {
         let temp = byte as i8 as i32;
-        let ts = base_ts + (i as u64) * (interval as u64);
+        let ts = base_ts + (i as u64) * u64::from(INTERVAL);
 
         // Check delta constraint
         if let Some(prev) = prev_temp {

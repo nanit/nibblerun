@@ -15,8 +15,8 @@ A high-performance time series compression library for Rust, optimized for tempe
 ```rust
 use nibblerun::{Encoder, decode};
 
-// Create encoder with 5-minute (300-second) intervals
-let mut enc: Encoder<i32> = Encoder::new(300);
+// Create encoder with 5-minute (300-second) intervals (default)
+let mut enc: Encoder<i32> = Encoder::new();
 
 // Append readings (timestamp, value)
 // Readings are quantized to interval boundaries
@@ -30,7 +30,7 @@ let bytes = enc.to_bytes();
 println!("Compressed size: {} bytes", bytes.len());
 
 // Decode back (interval must match encoding)
-let readings = decode::<i32>(&bytes, 300);
+let readings = decode::<i32, 300>(&bytes);
 for r in readings {
     println!("ts: {}, value: {}", r.ts, r.value);
 }
@@ -38,6 +38,9 @@ for r in readings {
 // ts: 1761000000, value: 24  (average of 23 and 25)
 // ts: 1761000300, value: 24
 // ts: 1761000600, value: 22
+
+// Custom interval example (10-minute intervals)
+let mut enc_10min: Encoder<i32, 600> = Encoder::new();
 ```
 
 ### Handling Gaps
@@ -47,7 +50,7 @@ Missing intervals are preserved in the output:
 ```rust
 use nibblerun::Encoder;
 
-let mut enc: Encoder<i32> = Encoder::new(300);
+let mut enc: Encoder<i32> = Encoder::new();
 
 enc.append(1761000000, 22).unwrap();   // 00:00 - interval 0
 enc.append(1761000300, 23).unwrap();   // 00:05 - interval 1
@@ -124,10 +127,10 @@ Note: The interval is NOT stored in the header - it must be provided to the deco
 
 ### Memory Layout
 
-The `Encoder<V>` struct is optimized for cache efficiency (56-64 bytes depending on value type):
+The `Encoder<V, const INTERVAL: u16 = 300>` struct is optimized for cache efficiency (56-64 bytes depending on value type):
 
 ```rust
-Encoder<V> {
+Encoder<V, const INTERVAL: u16 = 300> {
     pending_avg: u64,      // Packed averaging state (count + sum)
     bit_accum: u32,        // Bit accumulator for encoding
     data: Vec<u8>,         // Encoded output buffer (24 bytes on 64-bit)
@@ -137,10 +140,11 @@ Encoder<V> {
     prev_value: V,         // Previous value (for delta)
     prev_logical_idx: u32, // Previous interval index
     count: u16,            // Reading count
-    interval: u16,         // Interval in seconds
     bit_count: u8,         // Bit accumulator count (0-31)
 }
 ```
+
+The interval is a compile-time const generic, enabling compiler optimizations for division operations.
 
 The `pending_avg` field packs multiple values to avoid extra fields:
 - Bits 0-9: Pending reading count for averaging (0-1023)
