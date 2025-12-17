@@ -4,9 +4,10 @@
 //! statistics to help optimize the nibblerun encoding scheme.
 
 use clap::Parser;
+use nibblerun::Encoder;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -30,6 +31,10 @@ struct Args {
     /// Number of threads (0 = auto)
     #[arg(short, long, default_value = "0")]
     threads: usize,
+
+    /// Output HTML report with interactive charts
+    #[arg(long)]
+    html: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -42,12 +47,17 @@ struct Stats {
     zero_run_lengths: HashMap<u32, u64>,
     // Gap counts (number of intervals skipped)
     gap_counts: HashMap<u32, u64>,
+    // Temperature distribution
+    temp_counts: HashMap<i32, u64>,
     max_zero_run: u32,
     max_delta: i32,
     min_delta: i32,
     // Temperature range
     max_temp: i32,
     min_temp: i32,
+    // Actual compression stats
+    actual_compressed_bytes: u64,
+    raw_input_bytes: u64,
 }
 
 impl Stats {
@@ -67,11 +77,17 @@ impl Stats {
             *self.gap_counts.entry(*k).or_insert(0) += v;
         }
 
+        for (k, v) in &other.temp_counts {
+            *self.temp_counts.entry(*k).or_insert(0) += v;
+        }
+
         self.max_zero_run = self.max_zero_run.max(other.max_zero_run);
         self.max_delta = self.max_delta.max(other.max_delta);
         self.min_delta = self.min_delta.min(other.min_delta);
         self.max_temp = self.max_temp.max(other.max_temp);
         self.min_temp = self.min_temp.min(other.min_temp);
+        self.actual_compressed_bytes += other.actual_compressed_bytes;
+        self.raw_input_bytes += other.raw_input_bytes;
     }
 
     fn print_report(&self) {
@@ -522,6 +538,637 @@ impl Stats {
                 format_num(single_gap_savings)
             );
         }
+
+        // Actual compression stats
+        println!();
+        println!("{}", "=".repeat(70));
+        println!("ACTUAL COMPRESSION (nibblerun)");
+        println!("{}", "=".repeat(70));
+        let actual_ratio = self.raw_input_bytes as f64 / self.actual_compressed_bytes as f64;
+        let estimated_ratio = (self.total_readings * 12) as f64 / total_bits.div_ceil(8) as f64;
+        println!(
+            "  Raw input size:        {} bytes ({} readings × 12 bytes)",
+            format_num(self.raw_input_bytes),
+            format_num(self.total_readings)
+        );
+        println!(
+            "  Actual compressed:     {} bytes",
+            format_num(self.actual_compressed_bytes)
+        );
+        println!(
+            "  Actual compression:    {:.1}x",
+            actual_ratio
+        );
+        println!(
+            "  Estimated (bit math):  {:.1}x",
+            estimated_ratio
+        );
+        println!(
+            "  Estimation accuracy:   {:.1}%",
+            (estimated_ratio / actual_ratio) * 100.0
+        );
+    }
+
+    fn generate_html(&self, path: &PathBuf) -> std::io::Result<()> {
+        let mut file = File::create(path)?;
+
+        // Calculate all the statistics we need for charts
+        let total = self.total_readings as f64;
+        let zeros: u64 = *self.delta_counts.get(&0).unwrap_or(&0);
+        let plus_one: u64 = *self.delta_counts.get(&1).unwrap_or(&0);
+        let minus_one: u64 = *self.delta_counts.get(&-1).unwrap_or(&0);
+        let plus_two: u64 = *self.delta_counts.get(&2).unwrap_or(&0);
+        let minus_two: u64 = *self.delta_counts.get(&-2).unwrap_or(&0);
+
+        let mut tier_3_10: u64 = 0;
+        let mut tier_11_plus: u64 = 0;
+        for (delta, count) in &self.delta_counts {
+            let abs_delta = delta.abs();
+            if (3..=10).contains(&abs_delta) {
+                tier_3_10 += count;
+            } else if abs_delta >= 11 {
+                tier_11_plus += count;
+            }
+        }
+
+        let pm1 = plus_one + minus_one;
+        let pm2 = plus_two + minus_two;
+        let total_gaps: u64 = self.gap_counts.values().sum();
+
+        // Bit costs
+        let mut zero_run_bits: u64 = 0;
+        for (len, count) in &self.zero_run_lengths {
+            let bits_per_run = match *len {
+                1..=7 => u64::from(*len),
+                8..=21 => 9,
+                22..=149 => 13,
+                _ => 13 * u64::from(*len).div_ceil(128),
+            };
+            zero_run_bits += bits_per_run * count;
+        }
+
+        let single_gaps_count = *self.gap_counts.get(&1).unwrap_or(&0);
+        let mut multi_gaps_bits: u64 = 0;
+        for (gap_size, count) in &self.gap_counts {
+            match *gap_size {
+                1 => {}
+                2..=65 => multi_gaps_bits += count * 14,
+                n => multi_gaps_bits += count * 14 * u64::from(n).div_ceil(64),
+            }
+        }
+        let gap_bits: u64 = single_gaps_count * 3 + multi_gaps_bits;
+
+        let pm1_bits = pm1 * 3;
+        let pm2_bits = pm2 * 5;
+        let tier_3_10_bits = tier_3_10 * 11;
+        let tier_11_plus_bits = tier_11_plus * 19;
+        let total_bits = zero_run_bits + pm1_bits + pm2_bits + tier_3_10_bits + tier_11_plus_bits + gap_bits;
+
+        // Delta distribution data (sorted by delta value, -20 to +20)
+        let mut delta_labels = Vec::new();
+        let mut delta_values = Vec::new();
+        for d in -20..=20 {
+            delta_labels.push(d.to_string());
+            delta_values.push(*self.delta_counts.get(&d).unwrap_or(&0));
+        }
+
+        // Zero-run length distribution (1-50)
+        let mut zr_labels = Vec::new();
+        let mut zr_values = Vec::new();
+        for len in 1..=50 {
+            zr_labels.push(len.to_string());
+            zr_values.push(*self.zero_run_lengths.get(&len).unwrap_or(&0));
+        }
+
+        // Gap size distribution (1-20)
+        let mut gap_labels = Vec::new();
+        let mut gap_values = Vec::new();
+        for g in 1..=20 {
+            gap_labels.push(g.to_string());
+            gap_values.push(*self.gap_counts.get(&g).unwrap_or(&0));
+        }
+
+        // Temperature distribution (use actual range from data)
+        let temp_min = self.min_temp.max(-50); // Clamp for display
+        let temp_max = self.max_temp.min(100);
+        let mut temp_labels = Vec::new();
+        let mut temp_values = Vec::new();
+        for t in temp_min..=temp_max {
+            temp_labels.push(format!("{}°", t));
+            temp_values.push(*self.temp_counts.get(&t).unwrap_or(&0));
+        }
+
+        // Cumulative delta distribution (for CDF chart)
+        let mut sorted_deltas: Vec<_> = self.delta_counts.iter().collect();
+        sorted_deltas.sort_by_key(|(d, _)| *d);
+        let mut cumulative_delta_labels = Vec::new();
+        let mut cumulative_delta_values = Vec::new();
+        let mut cumsum: u64 = 0;
+        for (delta, count) in &sorted_deltas {
+            cumsum += *count;
+            cumulative_delta_labels.push(delta.to_string());
+            cumulative_delta_values.push((cumsum as f64 / total * 100.0) as f64);
+        }
+
+        // Cumulative zero-run distribution
+        let mut sorted_zr: Vec<_> = self.zero_run_lengths.iter().collect();
+        sorted_zr.sort_by_key(|(len, _)| *len);
+        let total_runs: u64 = self.zero_run_lengths.values().sum();
+        let mut cumulative_zr_labels = Vec::new();
+        let mut cumulative_zr_values = Vec::new();
+        let mut zr_cumsum: u64 = 0;
+        for (len, count) in &sorted_zr {
+            zr_cumsum += *count;
+            cumulative_zr_labels.push(len.to_string());
+            cumulative_zr_values.push((zr_cumsum as f64 / total_runs as f64 * 100.0) as f64);
+        }
+
+        write!(file, r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NibbleRun Data Analysis</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #333;
+        }}
+        h1 {{
+            text-align: center;
+            color: #1976D2;
+            margin-bottom: 10px;
+        }}
+        .subtitle {{
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+        }}
+        .stats-row {{
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }}
+        .stat-card {{
+            background: white;
+            padding: 20px 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+        }}
+        .stat-value {{
+            font-size: 2em;
+            font-weight: bold;
+            color: #1976D2;
+        }}
+        .stat-label {{
+            color: #666;
+            font-size: 0.9em;
+        }}
+        .charts-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }}
+        .chart-card {{
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .chart-card h3 {{
+            margin-top: 0;
+            color: #333;
+            border-bottom: 2px solid #1976D2;
+            padding-bottom: 10px;
+        }}
+        .chart-container {{
+            position: relative;
+            height: 300px;
+        }}
+        .pie-container {{
+            position: relative;
+            height: 350px;
+        }}
+        footer {{
+            text-align: center;
+            margin-top: 40px;
+            color: #999;
+            font-size: 0.9em;
+        }}
+    </style>
+</head>
+<body>
+    <h1>NibbleRun Data Analysis</h1>
+    <p class="subtitle">Compression statistics for {files} files, {readings} readings</p>
+
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-value">{compression_ratio:.1}x</div>
+            <div class="stat-label">Compression Ratio</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{zero_pct:.1}%</div>
+            <div class="stat-label">Zero Deltas</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{temp_range}</div>
+            <div class="stat-label">Temperature Range</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{total_bytes}</div>
+            <div class="stat-label">Compressed Size</div>
+        </div>
+    </div>
+
+    <div class="charts-grid">
+        <div class="chart-card">
+            <h3>Delta Distribution</h3>
+            <div class="chart-container">
+                <canvas id="deltaChart"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-card">
+            <h3>Bit Cost by Encoding Tier</h3>
+            <div class="pie-container">
+                <canvas id="bitCostChart"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-card">
+            <h3>Zero-Run Length Distribution</h3>
+            <div class="chart-container">
+                <canvas id="zeroRunChart"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-card">
+            <h3>Event Distribution</h3>
+            <div class="pie-container">
+                <canvas id="eventChart"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-card">
+            <h3>Gap Size Distribution</h3>
+            <div class="chart-container">
+                <canvas id="gapChart"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-card">
+            <h3>Temperature Distribution</h3>
+            <div class="chart-container">
+                <canvas id="tempChart"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-card">
+            <h3>Cumulative Delta Distribution (CDF)</h3>
+            <div class="chart-container">
+                <canvas id="cdfDeltaChart"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-card">
+            <h3>Cumulative Zero-Run Distribution (CDF)</h3>
+            <div class="chart-container">
+                <canvas id="cdfZeroRunChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        Generated by nbl-analyze · NibbleRun Time Series Compression
+    </footer>
+
+    <script>
+        // Delta distribution chart
+        new Chart(document.getElementById('deltaChart'), {{
+            type: 'bar',
+            data: {{
+                labels: {delta_labels:?},
+                datasets: [{{
+                    label: 'Count',
+                    data: {delta_values:?},
+                    backgroundColor: 'rgba(25, 118, 210, 0.7)',
+                    borderColor: 'rgba(25, 118, 210, 1)',
+                    borderWidth: 1
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{ display: false }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: (ctx) => `${{ctx.parsed.y.toLocaleString()}} occurrences`
+                        }}
+                    }}
+                }},
+                scales: {{
+                    x: {{ title: {{ display: true, text: 'Delta Value' }} }},
+                    y: {{
+                        type: 'logarithmic',
+                        title: {{ display: true, text: 'Count (log scale)' }},
+                        min: 1
+                    }}
+                }}
+            }}
+        }});
+
+        // Bit cost pie chart
+        new Chart(document.getElementById('bitCostChart'), {{
+            type: 'doughnut',
+            data: {{
+                labels: ['Zero runs', '±1 deltas', '±2 deltas', '±3-10 deltas', '±11+ deltas', 'Gaps'],
+                datasets: [{{
+                    data: [{zero_run_bits}, {pm1_bits}, {pm2_bits}, {tier_3_10_bits}, {tier_11_plus_bits}, {gap_bits}],
+                    backgroundColor: [
+                        '#4CAF50',
+                        '#FF9800',
+                        '#FFB74D',
+                        '#FFCC80',
+                        '#EF5350',
+                        '#9C27B0'
+                    ]
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{ position: 'right' }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: (ctx) => {{
+                                const bits = ctx.parsed;
+                                const pct = (bits / {total_bits} * 100).toFixed(1);
+                                return `${{bits.toLocaleString()}} bits (${{pct}}%)`;
+                            }}
+                        }}
+                    }}
+                }}
+            }}
+        }});
+
+        // Zero-run length chart
+        new Chart(document.getElementById('zeroRunChart'), {{
+            type: 'bar',
+            data: {{
+                labels: {zr_labels:?},
+                datasets: [{{
+                    label: 'Count',
+                    data: {zr_values:?},
+                    backgroundColor: 'rgba(76, 175, 80, 0.7)',
+                    borderColor: 'rgba(76, 175, 80, 1)',
+                    borderWidth: 1
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{ display: false }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: (ctx) => `${{ctx.parsed.y.toLocaleString()}} runs`
+                        }}
+                    }}
+                }},
+                scales: {{
+                    x: {{ title: {{ display: true, text: 'Run Length' }} }},
+                    y: {{
+                        type: 'logarithmic',
+                        title: {{ display: true, text: 'Count (log scale)' }},
+                        min: 1
+                    }}
+                }}
+            }}
+        }});
+
+        // Event distribution pie chart
+        new Chart(document.getElementById('eventChart'), {{
+            type: 'doughnut',
+            data: {{
+                labels: ['Zero (δ=0)', '±1', '±2', '±3-10', '±11+', 'Gaps'],
+                datasets: [{{
+                    data: [{zeros}, {pm1}, {pm2}, {tier_3_10}, {tier_11_plus}, {total_gaps}],
+                    backgroundColor: [
+                        '#4CAF50',
+                        '#FF9800',
+                        '#FFB74D',
+                        '#FFCC80',
+                        '#EF5350',
+                        '#9C27B0'
+                    ]
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{ position: 'right' }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: (ctx) => {{
+                                const total = {total_events};
+                                const pct = (ctx.parsed / total * 100).toFixed(2);
+                                return `${{ctx.parsed.toLocaleString()}} (${{pct}}%)`;
+                            }}
+                        }}
+                    }}
+                }}
+            }}
+        }});
+
+        // Gap size chart
+        new Chart(document.getElementById('gapChart'), {{
+            type: 'bar',
+            data: {{
+                labels: {gap_labels:?},
+                datasets: [{{
+                    label: 'Count',
+                    data: {gap_values:?},
+                    backgroundColor: 'rgba(156, 39, 176, 0.7)',
+                    borderColor: 'rgba(156, 39, 176, 1)',
+                    borderWidth: 1
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{ display: false }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: (ctx) => `${{ctx.parsed.y.toLocaleString()}} gaps`
+                        }}
+                    }}
+                }},
+                scales: {{
+                    x: {{ title: {{ display: true, text: 'Gap Size (intervals)' }} }},
+                    y: {{
+                        type: 'logarithmic',
+                        title: {{ display: true, text: 'Count (log scale)' }},
+                        min: 1
+                    }}
+                }}
+            }}
+        }});
+
+        // Temperature distribution chart
+        new Chart(document.getElementById('tempChart'), {{
+            type: 'bar',
+            data: {{
+                labels: {temp_labels:?},
+                datasets: [{{
+                    label: 'Count',
+                    data: {temp_values:?},
+                    backgroundColor: 'rgba(233, 30, 99, 0.7)',
+                    borderColor: 'rgba(233, 30, 99, 1)',
+                    borderWidth: 1
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{ display: false }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: (ctx) => `${{ctx.parsed.y.toLocaleString()}} readings`
+                        }}
+                    }}
+                }},
+                scales: {{
+                    x: {{ title: {{ display: true, text: 'Temperature' }} }},
+                    y: {{ title: {{ display: true, text: 'Count' }} }}
+                }}
+            }}
+        }});
+
+        // Cumulative delta distribution (CDF)
+        new Chart(document.getElementById('cdfDeltaChart'), {{
+            type: 'line',
+            data: {{
+                labels: {cumulative_delta_labels:?},
+                datasets: [{{
+                    label: 'Cumulative %',
+                    data: {cumulative_delta_values:?},
+                    borderColor: 'rgba(25, 118, 210, 1)',
+                    backgroundColor: 'rgba(25, 118, 210, 0.1)',
+                    fill: true,
+                    tension: 0.1
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{ display: false }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: (ctx) => `${{ctx.parsed.y.toFixed(2)}}% of deltas ≤ ${{ctx.label}}`
+                        }}
+                    }}
+                }},
+                scales: {{
+                    x: {{ title: {{ display: true, text: 'Delta Value' }} }},
+                    y: {{
+                        title: {{ display: true, text: 'Cumulative %' }},
+                        min: 0,
+                        max: 100
+                    }}
+                }}
+            }}
+        }});
+
+        // Cumulative zero-run distribution (CDF)
+        new Chart(document.getElementById('cdfZeroRunChart'), {{
+            type: 'line',
+            data: {{
+                labels: {cumulative_zr_labels:?},
+                datasets: [{{
+                    label: 'Cumulative %',
+                    data: {cumulative_zr_values:?},
+                    borderColor: 'rgba(76, 175, 80, 1)',
+                    backgroundColor: 'rgba(76, 175, 80, 0.1)',
+                    fill: true,
+                    tension: 0.1
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{ display: false }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: (ctx) => `${{ctx.parsed.y.toFixed(2)}}% of runs ≤ ${{ctx.label}} zeros`
+                        }}
+                    }}
+                }},
+                scales: {{
+                    x: {{ title: {{ display: true, text: 'Zero-Run Length' }} }},
+                    y: {{
+                        title: {{ display: true, text: 'Cumulative %' }},
+                        min: 0,
+                        max: 100
+                    }}
+                }}
+            }}
+        }});
+    </script>
+</body>
+</html>
+"##,
+            files = format_num(self.files_processed),
+            readings = format_num(self.total_readings),
+            compression_ratio = self.raw_input_bytes as f64 / self.actual_compressed_bytes as f64,
+            zero_pct = 100.0 * zeros as f64 / total,
+            temp_range = format!("{}°C to {}°C", self.min_temp, self.max_temp),
+            total_bytes = format_num(self.actual_compressed_bytes),
+            delta_labels = delta_labels,
+            delta_values = delta_values,
+            zero_run_bits = zero_run_bits,
+            pm1_bits = pm1_bits,
+            pm2_bits = pm2_bits,
+            tier_3_10_bits = tier_3_10_bits,
+            tier_11_plus_bits = tier_11_plus_bits,
+            gap_bits = gap_bits,
+            total_bits = total_bits,
+            zr_labels = zr_labels,
+            zr_values = zr_values,
+            zeros = zeros,
+            pm1 = pm1,
+            pm2 = pm2,
+            tier_3_10 = tier_3_10,
+            tier_11_plus = tier_11_plus,
+            total_gaps = total_gaps,
+            total_events = self.total_readings + total_gaps,
+            gap_labels = gap_labels,
+            gap_values = gap_values,
+            temp_labels = temp_labels,
+            temp_values = temp_values,
+            cumulative_delta_labels = cumulative_delta_labels,
+            cumulative_delta_values = cumulative_delta_values,
+            cumulative_zr_labels = cumulative_zr_labels,
+            cumulative_zr_values = cumulative_zr_values,
+        )?;
+
+        Ok(())
     }
 }
 
@@ -548,6 +1195,9 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
         max_delta: i32::MIN,
         ..Default::default()
     };
+
+    // Collect readings for actual compression
+    let mut readings: Vec<(u64, i32)> = Vec::new();
 
     let mut prev_temp: Option<i32> = None;
     let mut prev_ts: Option<u64> = None;
@@ -589,9 +1239,13 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
             continue;
         }
 
+        // Collect for compression
+        readings.push((ts, temp));
+
         stats.total_readings += 1;
         stats.max_temp = stats.max_temp.max(temp);
         stats.min_temp = stats.min_temp.min(temp);
+        *stats.temp_counts.entry(temp).or_insert(0) += 1;
 
         if let Some(pt) = prev_temp {
             let delta = temp - pt;
@@ -634,6 +1288,18 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
             .entry(current_zero_run)
             .or_insert(0) += 1;
         stats.max_zero_run = stats.max_zero_run.max(current_zero_run);
+    }
+
+    // Actually compress the data with nibblerun
+    if !readings.is_empty() {
+        let mut encoder: Encoder<i32, 300> = Encoder::new();
+        for (ts, temp) in &readings {
+            let _ = encoder.append(*ts, *temp);
+        }
+        let compressed = encoder.to_bytes();
+        stats.actual_compressed_bytes = compressed.len() as u64;
+        // Raw size: 8 bytes timestamp + 4 bytes i32 temp per reading
+        stats.raw_input_bytes = (readings.len() * 12) as u64;
     }
 
     stats.files_processed = 1;
@@ -710,4 +1376,12 @@ fn main() {
 
     let stats = global_stats.lock().unwrap();
     stats.print_report();
+
+    // Generate HTML report if requested
+    if let Some(html_path) = &args.html {
+        match stats.generate_html(html_path) {
+            Ok(()) => println!("\nHTML report written to: {}", html_path.display()),
+            Err(e) => eprintln!("\nFailed to write HTML report: {}", e),
+        }
+    }
 }
