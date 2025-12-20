@@ -59,10 +59,11 @@ pub fn rounded_avg(sum: i32, count: u16) -> i32 {
         return sum;
     }
     let c = i32::from(count);
+    // Use saturating arithmetic to handle malformed input gracefully
     if sum >= 0 {
-        (sum + c / 2) / c
+        sum.saturating_add(c / 2) / c
     } else {
-        (sum - c / 2) / c
+        sum.saturating_sub(c / 2) / c
     }
 }
 

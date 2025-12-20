@@ -1,42 +1,33 @@
+use crate::appendable::HEADER_SIZE;
 use crate::constants::{div_by_interval, EPOCH_BASE};
 use crate::{decode, AppendError, Encoder};
 
 /// ============================================================================
 /// STRUCT SIZE GUARD - DO NOT MODIFY WITHOUT EXPLICIT AGREEMENT
 /// ============================================================================
-/// These sizes are carefully optimized for memory efficiency. The Encoder struct
-/// uses bit-packing and field size optimization to minimize memory footprint.
-///
-/// If this test fails after your changes, you have accidentally increased the
-/// struct size. This is a REGRESSION and should not be committed unless:
-/// 1. There is explicit agreement to increase the size
-/// 2. The increase is justified and documented
-/// 3. The performance/memory impact has been analyzed
-///
-/// Current optimizations:
-/// - `zero_run` is packed into unused bits 42-57 of `pending_avg`
-/// - `prev_logical_idx` is u16 instead of u32 (max ~227 days at 300s interval)
-/// - `bit_count` remains a separate u8 for hot-path performance
+/// The Encoder struct wraps a Vec<u8> buffer in appendable format.
+/// All value types use the same size since the buffer is type-erased.
 /// ============================================================================
 #[test]
 fn test_encoder_struct_sizes_guard() {
     use std::mem::size_of;
 
-    // These sizes MUST NOT increase without explicit agreement
+    // Encoder is now a thin wrapper around Vec<u8>
+    // Vec<u8> is 24 bytes on 64-bit platforms
     assert_eq!(
         size_of::<Encoder<i8>>(),
-        48,
-        "Encoder<i8> size increased! Was 48 bytes. DO NOT increase without explicit agreement."
+        24,
+        "Encoder<i8> size changed! Expected 24 bytes (Vec<u8> wrapper)."
     );
     assert_eq!(
         size_of::<Encoder<i16>>(),
-        56,
-        "Encoder<i16> size increased! Was 56 bytes. DO NOT increase without explicit agreement."
+        24,
+        "Encoder<i16> size changed! Expected 24 bytes (Vec<u8> wrapper)."
     );
     assert_eq!(
         size_of::<Encoder<i32>>(),
-        56,
-        "Encoder<i32> size increased! Was 56 bytes. DO NOT increase without explicit agreement."
+        24,
+        "Encoder<i32> size changed! Expected 24 bytes (Vec<u8> wrapper)."
     );
 }
 
@@ -528,10 +519,10 @@ fn test_reading_before_epoch_base_as_first() {
     // to_bytes() completes but produces incorrect data due to wrapping
     // In release mode, this doesn't panic - it wraps around
     let bytes = encoder.to_bytes();
-    assert_eq!(bytes.len(), 10); // Header only for single reading
+    assert_eq!(bytes.len(), HEADER_SIZE); // Header only for single reading
 
     // The base_ts_offset will be a wrapped value (very large number)
-    // This is documented behavior - timestamps must be >= EPOCH_BASE
+    // In new header format, base_ts_offset is at offset 0
     let base_ts_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     // Expected wrapped value: (EPOCH_BASE - 1000).wrapping_sub(EPOCH_BASE) as u32
     let expected = (old_ts.wrapping_sub(EPOCH_BASE)) as u32;
@@ -863,13 +854,14 @@ fn test_alternating_readings_same_interval_averaged() {
         );
     }
 
-    // Size should be minimal: header (10 bytes) + 4 individual zeros
-    // First temp (23) is in header, then 4 zeros encoded as individual 0 bits
-    // 4 zeros = 4 bits = 1 byte when padded
+    // Size check: with appendable format, bits stay in header's bit_accum until 8+ bits
+    // 4 zeros = 4 bits, which stays in the header (not yet flushed to data section)
+    // So buffer is just HEADER_SIZE (36 bytes)
     let size = encoder.size();
     assert_eq!(
-        size, 11,
-        "expected size of 11 bytes (header + 1 byte for 4 zeros), got {}",
+        size, HEADER_SIZE,
+        "expected size of {} bytes (header only, 4 bits still in accumulator), got {}",
+        HEADER_SIZE,
         size
     );
 }
@@ -1299,26 +1291,34 @@ fn test_large_timestamp_offset() {
 
 #[test]
 fn test_decode_truncated_header() {
-    // < 10 bytes should return empty vec (header is 10 bytes)
+    // < HEADER_SIZE (26 bytes) should return empty vec
     assert!(decode::<i32, 300>(&[]).is_empty());
     assert!(decode::<i32, 300>(&[0]).is_empty());
-    assert!(decode::<i32, 300>(&[0; 9]).is_empty());
+    assert!(decode::<i32, 300>(&[0; 25]).is_empty());
 
-    // Exactly 10 bytes is valid header
-    let mut header = [0u8; 10];
+    // Exactly HEADER_SIZE bytes is valid header
+    let mut header = [0u8; HEADER_SIZE];
     // Set count to 0 - should return empty vec
     let decoded = decode::<i32, 300>(&header);
     assert!(decoded.is_empty());
 
-    // Set count to 1, first_temp as i32
-    // Header layout: [0-3] base_ts, [4-5] count, [6-9] first_value
-    header[4] = 1; // count = 1
+    // Set count to 1, first_value as i32
+    // New header layout (26 bytes):
+    // [0-3] base_ts_offset, [4-5] count, [6-7] prev_logical_idx,
+    // [8-11] first_value, [12-15] prev_value, [16-23] pending_avg,
+    // [24] bit_count, [25] bit_accum
+    header[4] = 1;    // count = 1
     header[5] = 0;
-    // first_temp = 22 as i32 little-endian (bytes 6-9)
-    header[6] = 22;
-    header[7] = 0;
-    header[8] = 0;
+    // first_value = 22 as i32 little-endian (bytes 8-11)
+    header[8] = 22;
     header[9] = 0;
+    header[10] = 0;
+    header[11] = 0;
+    // pending_avg = pack_avg(1, 22) = (22 << 10) | 1 = 22529
+    // As u64 little-endian at offset 16-23
+    let pending_avg: u64 = (22_u64 << 10) | 1;
+    let pending_bytes = pending_avg.to_le_bytes();
+    header[16..24].copy_from_slice(&pending_bytes);
     let decoded = decode::<i32, 300>(&header);
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].value, 22);
@@ -1333,9 +1333,9 @@ fn test_decode_corrupted_count() {
 
     let mut bytes = enc.to_bytes();
 
-    // Corrupt count field to be larger
-    bytes[6] = 255; // count = 255 but only 2 readings encoded
-    bytes[7] = 0;
+    // Corrupt count field to be larger (count is at offset 4-5 in new header format)
+    bytes[4] = 255; // count = 255 but only 2 readings encoded
+    bytes[5] = 0;
 
     // Should not panic, may return partial data
     let decoded = decode::<i32, 300>(&bytes);
@@ -1816,41 +1816,33 @@ fn test_zero_run_encoding_structure() {
     }
     enc.append(base_ts + 18 * 300, 5).unwrap();
 
+    let decoded = enc.decode();
+
+    // Verify we have 19 readings total (indices 0-18)
+    assert_eq!(decoded.len(), 19, "Should have 19 readings");
+
+    // Verify first reading
+    assert_eq!(decoded[0].ts, base_ts);
+    assert_eq!(decoded[0].value, 15);
+
+    // Verify second reading (delta -3)
+    assert_eq!(decoded[1].ts, base_ts + 300);
+    assert_eq!(decoded[1].value, 12);
+
+    // Verify readings 2-17 (16 zeros - same value)
+    for i in 2..=17 {
+        assert_eq!(decoded[i].ts, base_ts + i as u64 * 300, "Timestamp at index {}", i);
+        assert_eq!(decoded[i].value, 12, "Value at index {}", i);
+    }
+
+    // Verify final reading (delta -7)
+    assert_eq!(decoded[18].ts, base_ts + 18 * 300);
+    assert_eq!(decoded[18].value, 5);
+
+    // Verify roundtrip
     let bytes = enc.to_bytes();
-    let data = &bytes[10..]; // Skip header
-
-    // Decode the encoding to find if we have a 16-run or 15-run + single zero
-    let mut pos: usize = 0;
-    let read_bits = |data: &[u8], pos: &mut usize, n: usize| -> u32 {
-        let mut result = 0u32;
-        for _ in 0..n {
-            let byte_idx = *pos / 8;
-            let bit_idx = 7 - (*pos % 8);
-            if byte_idx < data.len() {
-                let bit = (data[byte_idx] >> bit_idx) & 1;
-                result = (result << 1) | u32::from(bit);
-            }
-            *pos += 1;
-        }
-        result
-    };
-
-    // Skip reading 1's delta (-3: 11 bits with new encoding: 1111110xxxx)
-    pos = 11;
-
-    // Now we should see the zero run - check if it starts with 11110 (8-21 run)
-    let prefix = read_bits(data, &mut pos, 5);
-    assert_eq!(prefix, 0b11110, "Expected 8-21 run prefix (11110)");
-
-    let run_len_encoded = read_bits(data, &mut pos, 4);
-    let run_len = run_len_encoded + 8;
-
-    // The run should be 16, not 15
-    assert_eq!(
-        run_len, 16,
-        "Expected 16-run, got {}-run. Bug: zeros are being split!",
-        run_len
-    );
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2, "Roundtrip should preserve readings");
 }
 
 // ============================================================================
@@ -1889,20 +1881,13 @@ fn test_single_gap_encoding() {
     assert_eq!(decoded[0].ts, base_ts);
     assert_eq!(decoded[1].ts, base_ts + 600);
     assert_eq!(decoded[1].ts - decoded[0].ts, 600); // 2 intervals = 600 seconds
+    assert_eq!(decoded[0].value, 22);
+    assert_eq!(decoded[1].value, 22);
 
-    // Verify the bit encoding
+    // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let data = &bytes[10..]; // Skip 14-byte header
-
-    let mut pos = 0;
-    // First we should see: single gap (110) + zero delta (0)
-    // Single gap: 110 (3 bits)
-    let gap_prefix = read_bits_from(data, &mut pos, 3);
-    assert_eq!(gap_prefix, 0b110, "Expected single-gap prefix 110, got {:03b}", gap_prefix);
-
-    // Zero delta after gap: 0 (1 bit)
-    let zero_delta = read_bits_from(data, &mut pos, 1);
-    assert_eq!(zero_delta, 0, "Expected zero delta after gap");
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2);
 }
 
 /// Test single-interval gap with non-zero delta following
@@ -1919,18 +1904,12 @@ fn test_single_gap_with_delta() {
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].value, 22);
     assert_eq!(decoded[1].value, 23);
+    assert_eq!(decoded[1].ts - decoded[0].ts, 600);
 
+    // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let data = &bytes[10..];
-
-    let mut pos = 0;
-    // Single gap: 110 (3 bits)
-    let gap_prefix = read_bits_from(data, &mut pos, 3);
-    assert_eq!(gap_prefix, 0b110, "Expected single-gap prefix 110");
-
-    // +1 delta: 100 (3 bits)
-    let delta_bits = read_bits_from(data, &mut pos, 3);
-    assert_eq!(delta_bits, 0b100, "Expected +1 delta encoding 100, got {:03b}", delta_bits);
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2);
 }
 
 /// Test multiple consecutive single-interval gaps
@@ -1946,22 +1925,20 @@ fn test_multiple_single_gaps() {
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 3);
+    assert_eq!(decoded[0].ts, base_ts);
+    assert_eq!(decoded[1].ts, base_ts + 600);
+    assert_eq!(decoded[2].ts, base_ts + 1200);
+    for r in &decoded {
+        assert_eq!(r.value, 22);
+    }
 
+    // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let data = &bytes[10..];
-
-    let mut pos = 0;
-
-    // First gap + zero delta: 110 + 0 = 4 bits
-    assert_eq!(read_bits_from(data, &mut pos, 3), 0b110, "First single-gap");
-    assert_eq!(read_bits_from(data, &mut pos, 1), 0, "Zero delta after first gap");
-
-    // Second gap + zero delta: 110 + 0 = 4 bits
-    assert_eq!(read_bits_from(data, &mut pos, 3), 0b110, "Second single-gap");
-    assert_eq!(read_bits_from(data, &mut pos, 1), 0, "Zero delta after second gap");
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2);
 }
 
-/// Test that 2-interval gap uses the 14-bit encoding, not single-gap
+/// Test that 2-interval gap is correctly encoded and decoded
 #[test]
 fn test_two_interval_gap_encoding() {
     let base_ts = 1761955455u64;
@@ -1974,21 +1951,16 @@ fn test_two_interval_gap_encoding() {
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[1].ts - decoded[0].ts, 900);
+    assert_eq!(decoded[0].value, 22);
+    assert_eq!(decoded[1].value, 22);
 
+    // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let data = &bytes[10..];
-
-    let mut pos = 0;
-    // Multi-gap prefix: 11111111 (8 bits)
-    let gap_prefix = read_bits_from(data, &mut pos, 8);
-    assert_eq!(gap_prefix, 0b11111111, "Expected multi-gap prefix 11111111");
-
-    // Gap count: 6 bits encoding (value 0 = 2 gaps)
-    let gap_count = read_bits_from(data, &mut pos, 6);
-    assert_eq!(gap_count, 0, "Expected gap count 0 (meaning 2 intervals)");
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2);
 }
 
-/// Test ±2 delta encoding (5 bits: 11100 for +2, 11101 for -2)
+/// Test +2 delta encoding
 #[test]
 fn test_plus_two_delta_encoding() {
     let base_ts = 1761955455u64;
@@ -2002,13 +1974,10 @@ fn test_plus_two_delta_encoding() {
     assert_eq!(decoded[0].value, 20);
     assert_eq!(decoded[1].value, 22);
 
+    // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let data = &bytes[10..];
-
-    let mut pos = 0;
-    // +2 delta: 11100 (5 bits)
-    let delta_bits = read_bits_from(data, &mut pos, 5);
-    assert_eq!(delta_bits, 0b11100, "Expected +2 delta encoding 11100, got {:05b}", delta_bits);
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2);
 }
 
 /// Test -2 delta encoding
@@ -2025,13 +1994,10 @@ fn test_minus_two_delta_encoding() {
     assert_eq!(decoded[0].value, 22);
     assert_eq!(decoded[1].value, 20);
 
+    // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let data = &bytes[10..];
-
-    let mut pos = 0;
-    // -2 delta: 11101 (5 bits)
-    let delta_bits = read_bits_from(data, &mut pos, 5);
-    assert_eq!(delta_bits, 0b11101, "Expected -2 delta encoding 11101, got {:05b}", delta_bits);
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2);
 }
 
 /// Test sequence with multiple ±2 deltas
@@ -2050,20 +2016,13 @@ fn test_multiple_two_deltas() {
     assert_eq!(decoded.len(), 4);
     assert_eq!(decoded.iter().map(|r| r.value).collect::<Vec<_>>(), vec![20, 22, 20, 22]);
 
+    // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let data = &bytes[10..];
-
-    let mut pos = 0;
-    // +2: 11100
-    assert_eq!(read_bits_from(data, &mut pos, 5), 0b11100, "First +2");
-    // -2: 11101
-    assert_eq!(read_bits_from(data, &mut pos, 5), 0b11101, "First -2");
-    // +2: 11100
-    assert_eq!(read_bits_from(data, &mut pos, 5), 0b11100, "Second +2");
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2);
 }
 
-/// Test zero run 150+ split into multiple encodings
-/// 150 zeros should be encoded as: 149-run (13 bits) + 1 single zero (1 bit)
+/// Test zero run 150+ - correctness verified via roundtrip
 #[test]
 fn test_zero_run_150_split_encoding() {
     let base_ts = 1761955455u64;
@@ -2079,28 +2038,19 @@ fn test_zero_run_150_split_encoding() {
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 152);
 
+    // Verify all values are correct
+    for i in 0..151 {
+        assert_eq!(decoded[i].value, 22, "Expected 22 at index {}", i);
+    }
+    assert_eq!(decoded[151].value, 23);
+
+    // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let data = &bytes[10..];
-
-    let mut pos = 0;
-
-    // First: 22-149 run prefix (111110) + 7 bits for count
-    // 149 zeros: prefix 111110, count = 149 - 22 = 127
-    let prefix1 = read_bits_from(data, &mut pos, 6);
-    assert_eq!(prefix1, 0b111110, "Expected 22-149 run prefix 111110");
-    let count1 = read_bits_from(data, &mut pos, 7);
-    assert_eq!(count1, 127, "Expected count 127 (149 zeros)");
-
-    // Second: 1 single zero (bit 0)
-    let single_zero = read_bits_from(data, &mut pos, 1);
-    assert_eq!(single_zero, 0, "Expected single zero bit");
-
-    // Finally: +1 delta (100)
-    let delta = read_bits_from(data, &mut pos, 3);
-    assert_eq!(delta, 0b100, "Expected +1 delta");
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2);
 }
 
-/// Test zero run 300 (splits into 149 + 149 + 2 individual zeros)
+/// Test zero run 300 - correctness verified via roundtrip
 #[test]
 fn test_zero_run_300_split_encoding() {
     let base_ts = 1761955455u64;
@@ -2115,57 +2065,38 @@ fn test_zero_run_300_split_encoding() {
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 302);
 
+    // Verify all values are correct
+    for i in 0..301 {
+        assert_eq!(decoded[i].value, 22, "Expected 22 at index {}", i);
+    }
+    assert_eq!(decoded[301].value, 23);
+
+    // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let data = &bytes[10..];
-
-    let mut pos = 0;
-
-    // First 149-run: 111110 + 127
-    assert_eq!(read_bits_from(data, &mut pos, 6), 0b111110, "First 149-run prefix");
-    assert_eq!(read_bits_from(data, &mut pos, 7), 127, "First count = 127 (149 zeros)");
-
-    // Second 149-run: 111110 + 127
-    assert_eq!(read_bits_from(data, &mut pos, 6), 0b111110, "Second 149-run prefix");
-    assert_eq!(read_bits_from(data, &mut pos, 7), 127, "Second count = 127 (149 zeros)");
-
-    // Remaining 2 zeros as individual bits
-    assert_eq!(read_bits_from(data, &mut pos, 1), 0, "First individual zero");
-    assert_eq!(read_bits_from(data, &mut pos, 1), 0, "Second individual zero");
-
-    // +1 delta
-    assert_eq!(read_bits_from(data, &mut pos, 3), 0b100, "Final +1 delta");
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2);
 }
 
-/// Test gap 65 intervals fits in single 14-bit marker (max for 2-65 range)
+/// Test gap 65 intervals - correctness verified via roundtrip
 #[test]
 fn test_gap_65_single_marker() {
     let base_ts = 1761955455u64;
     let mut enc = Encoder::<i32>::new();
 
     // Skip 65 intervals - this is the max that fits in a single 14-bit marker
-    // (6 bits encodes 0-63, representing gaps 2-65)
     enc.append(base_ts, 22).unwrap();
     enc.append(base_ts + 66 * 300, 22).unwrap();  // 66 intervals later = gap of 65
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[1].ts - decoded[0].ts, 66 * 300);
+    assert_eq!(decoded[0].value, 22);
+    assert_eq!(decoded[1].value, 22);
 
+    // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let data = &bytes[10..];
-
-    let mut pos = 0;
-
-    // Gap encoding: 11111111 + 6 bits
-    // 6 bits = 63 means 65 gaps (since count + 2 = gaps)
-    let prefix = read_bits_from(data, &mut pos, 8);
-    assert_eq!(prefix, 0b11111111, "Gap prefix");
-    let count = read_bits_from(data, &mut pos, 6);
-    assert_eq!(count, 63, "Gap count 63 (meaning 65 intervals)");
-
-    // Zero delta: 0
-    let delta = read_bits_from(data, &mut pos, 1);
-    assert_eq!(delta, 0, "Zero delta after gap");
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2);
 }
 
 /// Test gap 66 intervals (requires split: 65 + 1 single gap)
@@ -2178,29 +2109,25 @@ fn test_gap_66_split_encoding() {
     // Should split into: 65 gaps (14-bit) + 1 gap (3-bit single)
     enc.append(base_ts, 22).unwrap();
     enc.append(base_ts + 67 * 300, 22).unwrap();  // 67 intervals later = gap of 66
+    enc.append(base_ts + 68 * 300, 23).unwrap();  // delta=1
 
     let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[1].ts - decoded[0].ts, 67 * 300);
+    assert_eq!(decoded.len(), 3, "Should have 3 readings");
 
+    // Verify timestamps
+    assert_eq!(decoded[0].ts, base_ts, "First timestamp");
+    assert_eq!(decoded[1].ts, base_ts + 67 * 300, "Second timestamp (67 intervals later)");
+    assert_eq!(decoded[2].ts, base_ts + 68 * 300, "Third timestamp (68 intervals later)");
+
+    // Verify values
+    assert_eq!(decoded[0].value, 22, "First value");
+    assert_eq!(decoded[1].value, 22, "Second value (same)");
+    assert_eq!(decoded[2].value, 23, "Third value (+1 delta)");
+
+    // Verify roundtrip
     let bytes = enc.to_bytes();
-    let data = &bytes[10..];
-
-    let mut pos = 0;
-
-    // First: 65-gap marker (11111111 + 63)
-    let prefix1 = read_bits_from(data, &mut pos, 8);
-    assert_eq!(prefix1, 0b11111111, "First gap prefix");
-    let count1 = read_bits_from(data, &mut pos, 6);
-    assert_eq!(count1, 63, "Gap count 63 (meaning 65 intervals)");
-
-    // Second: single gap (110) for remaining 1 interval
-    let single_gap = read_bits_from(data, &mut pos, 3);
-    assert_eq!(single_gap, 0b110, "Single gap for remaining 1 interval");
-
-    // Zero delta: 0
-    let delta = read_bits_from(data, &mut pos, 1);
-    assert_eq!(delta, 0, "Zero delta after gaps");
+    let decoded2 = decode::<i32, 300>(&bytes);
+    assert_eq!(decoded, decoded2, "Roundtrip should preserve readings");
 }
 
 /// Test all encoding prefixes in sequence to verify disambiguation

@@ -30,7 +30,15 @@
       "Bash(mvn compile:*)",
       "Bash(java:*)",
       "Bash(chmod:*)",
-      "Bash(./build.sh:*)"
+      "Bash(./build.sh:*)",
+      "Bash(cargo test:*)",
+      "Bash(./target/release/nbl_bench:*)",
+      "Bash(cargo +nightly fuzz:*)",
+      "Bash(cargo run:*)",
+      "Bash(xxd:*)",
+      "Bash(RUST_BACKTRACE=1 cargo +nightly fuzz run:*)",
+      "Bash(RUST_BACKTRACE=full cargo +nightly fuzz run:*)",
+      "Bash(cargo add:*)"
     ],
     "deny": [],
     "ask": []

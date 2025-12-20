@@ -41,3 +41,7 @@ NibbleRun is a Rust library for high-performance lossless time series compressio
 - Temperature range: -108 to 147 (i8 offset from base of 20)
 - Max readings per encoder: 65535
 - Interval: 300 seconds fixed
+
+## Guidelines
+
+- Never calculate - always measure. When benchmarking or reporting performance, measure actual values rather than deriving them from other measurements.

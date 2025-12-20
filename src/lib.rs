@@ -113,7 +113,8 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_wrap)]
 
-mod constants;
+pub mod appendable;
+pub mod constants;
 mod decoder;
 mod encoder;
 mod error;
@@ -124,6 +125,7 @@ mod value;
 mod tests;
 
 // Re-export public API
+pub use appendable::HEADER_SIZE;
 pub use decoder::decode;
 pub use encoder::Encoder;
 pub use error::AppendError;

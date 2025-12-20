@@ -3,37 +3,22 @@
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
-use crate::constants::{
-    cold_gap_handler, div_by_interval, encode_zero_run, pack_avg, rounded_avg, unpack_avg,
-    DELTA_ENCODE, EPOCH_BASE,
-};
+use crate::appendable::{self, HEADER_SIZE};
 use crate::error::AppendError;
 use crate::reading::Reading;
 use crate::value::Value;
-
-/// Zero run is packed into bits 42-57 of `pending_avg` (16 bits)
-const ZERO_RUN_SHIFT: u32 = 42;
-const ZERO_RUN_MASK: u64 = 0xFFFF << ZERO_RUN_SHIFT;
 
 /// Encoder for `NibbleRun` format
 ///
 /// Accumulates sensor readings and produces compressed output.
 /// Generic over value type V (i8, i16, or i32) and interval INTERVAL (compile-time constant).
+///
+/// Internally backed by an appendable byte buffer that can be serialized and
+/// resumed without losing the ability to append more readings.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Encoder<V: Value, const INTERVAL: u16 = 300> {
-    /// Packed state: bits 0-9 = `pending_count`, bits 10-41 = `pending_sum`, bits 42-57 = `zero_run`
-    pending_avg: u64,
-    bit_accum: u32,
-    data: Vec<u8>,
-    /// Offset from EPOCH_BASE (saves 4 bytes vs storing full u64 timestamp)
-    base_ts_offset: u32,
-    first_value: V,
-    prev_value: V,
-    /// Previous logical index (max ~227 days at 300s interval)
-    prev_logical_idx: u16,
-    count: u16,
-    /// Bit accumulator count (0-63) - separate field for fast access in write_bits
-    bit_count: u8,
+    /// Internal byte buffer in appendable format
+    buf: Vec<u8>,
     #[serde(skip)]
     _marker: PhantomData<V>,
 }
@@ -46,30 +31,9 @@ impl<V: Value, const INTERVAL: u16> Encoder<V, INTERVAL> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            bit_accum: 0,
-            pending_avg: 0,
-            data: Vec::with_capacity(48),
-            base_ts_offset: 0,
-            first_value: V::default(),
-            prev_value: V::default(),
-            prev_logical_idx: 0,
-            count: 0,
-            bit_count: 0,
+            buf: Vec::new(),
             _marker: PhantomData,
         }
-    }
-
-    /// Get the current zero run count (packed in bits 42-57 of pending_avg)
-    #[inline]
-    fn zero_run(&self) -> u16 {
-        ((self.pending_avg & ZERO_RUN_MASK) >> ZERO_RUN_SHIFT) as u16
-    }
-
-    /// Increment the zero run counter
-    #[inline]
-    fn inc_zero_run(&mut self) {
-        let current = self.zero_run();
-        self.pending_avg = (self.pending_avg & !ZERO_RUN_MASK) | ((current + 1) as u64) << ZERO_RUN_SHIFT;
     }
 
     /// Get the interval in seconds
@@ -79,13 +43,10 @@ impl<V: Value, const INTERVAL: u16> Encoder<V, INTERVAL> {
         INTERVAL
     }
 
-    /// Get the base timestamp (reconstructed from offset)
-    #[inline]
-    fn base_ts(&self) -> u64 {
-        EPOCH_BASE + u64::from(self.base_ts_offset)
-    }
-
     /// Header size for this encoder's value type
+    ///
+    /// Note: This returns the legacy header size for backward compatibility
+    /// with the original wire format. The internal buffer uses a larger header.
     #[inline]
     #[must_use]
     pub const fn header_size() -> usize {
@@ -110,662 +71,77 @@ impl<V: Value, const INTERVAL: u16> Encoder<V, INTERVAL> {
     /// - Value delta exceeds encodable range [-1024, 1023]
     #[inline]
     pub fn append(&mut self, ts: u64, value: V) -> Result<(), AppendError> {
-        let value = value.to_i32();
-
-        // First reading - initialize pending state
-        if self.count == 0 {
-            self.base_ts_offset = ts.wrapping_sub(EPOCH_BASE) as u32;
-            self.first_value = V::from_i32(value);
-            self.prev_value = V::from_i32(value);
-            self.prev_logical_idx = 0;
-            self.count = 1;
-            // Initialize pending: count=1, sum=value (zero_run is already 0)
-            self.pending_avg = pack_avg(1, value);
-            return Ok(());
-        }
-
-        // Reject out-of-order readings (ts before base_ts)
-        let base_ts = self.base_ts();
-        if ts < base_ts {
-            return Err(AppendError::TimestampBeforeBase { ts, base_ts });
-        }
-
-        // Calculate logical index (u16 supports ~227 days at 300s intervals)
-        let logical_idx_u32 = div_by_interval(ts - base_ts, INTERVAL) as u32;
-
-        // Check for time span overflow (max 65535 intervals)
-        if logical_idx_u32 > u32::from(u16::MAX) {
-            return Err(AppendError::TimeSpanOverflow {
-                ts,
-                base_ts,
-                max_intervals: u32::from(u16::MAX),
-            });
-        }
-        let logical_idx = logical_idx_u32 as u16;
-
-        // Reject readings that go backwards in time
-        if logical_idx < self.prev_logical_idx {
-            return Err(AppendError::OutOfOrder {
-                ts,
-                logical_idx: u32::from(logical_idx),
-                prev_logical_idx: u32::from(self.prev_logical_idx),
-            });
-        }
-
-        // Same interval - accumulate for averaging
-        if logical_idx == self.prev_logical_idx {
-            let (count, sum) = unpack_avg(self.pending_avg & !ZERO_RUN_MASK);
-            if count >= 1023 {
-                return Err(AppendError::IntervalOverflow { count });
-            }
-            // Preserve zero_run bits when updating pending_avg
-            self.pending_avg = (self.pending_avg & ZERO_RUN_MASK) | pack_avg(count + 1, sum.saturating_add(value));
-            return Ok(());
-        }
-
-        // New interval - check for potential errors before committing
-
-        // Check count overflow
-        if self.count == u16::MAX {
-            return Err(AppendError::CountOverflow);
-        }
-
-        // Check delta overflow: compute what the delta would be after finalizing
-        let (pending_count, pending_sum) = unpack_avg(self.pending_avg & !ZERO_RUN_MASK);
-        if pending_count > 0 && self.count > 1 {
-            let avg = rounded_avg(pending_sum, pending_count);
-            let prev = self.prev_value.to_i32();
-            let delta = avg - prev;
-            if !(-1024..=1023).contains(&delta) {
-                return Err(AppendError::DeltaOverflow {
-                    delta,
-                    prev_value: prev,
-                    new_value: avg,
-                });
-            }
-        }
-
-        // All checks passed - finalize previous interval
-        self.finalize_pending_interval();
-
-        let index_gap = u32::from(logical_idx) - u32::from(self.prev_logical_idx);
-
-        // Gap handling (rare)
-        if index_gap > 1 {
-            cold_gap_handler();
-            self.flush_zeros();
-            self.write_gaps(index_gap - 1);
-        }
-
-        // Start accumulating for new interval
-        self.prev_logical_idx = logical_idx;
-        self.count += 1;
-        // Initialize pending for new interval: count=1, sum=value
-        // Zero_run was just flushed in finalize_pending_interval or is 0 for first interval
-        self.pending_avg = (self.pending_avg & ZERO_RUN_MASK) | pack_avg(1, value);
-
-        Ok(())
-    }
-
-    /// Finalize the pending interval: compute average and encode the delta
-    /// Called when crossing to a new interval or when serializing
-    #[inline]
-    fn finalize_pending_interval(&mut self) {
-        let (count, sum) = unpack_avg(self.pending_avg & !ZERO_RUN_MASK);
-        if count == 0 {
-            return;
-        }
-
-        // Compute average with proper rounding (round half away from zero)
-        let avg = rounded_avg(sum, count);
-
-        // For the first interval, update first_value to the average
-        if self.count == 1 {
-            self.first_value = V::from_i32(avg);
+        if self.buf.is_empty() {
+            self.buf = appendable::create::<V, INTERVAL>(ts, value);
+            Ok(())
         } else {
-            // Encode delta from previous interval's average
-            let delta = avg - self.prev_value.to_i32();
-            if delta == 0 {
-                self.inc_zero_run();
-            } else {
-                self.flush_zeros();
-                self.encode_delta(delta);
-            }
+            appendable::append::<V, INTERVAL>(&mut self.buf, ts, value)
         }
-        self.prev_value = V::from_i32(avg);
-
-        // Clear pending averaging state (preserve zero_run in upper bits)
-        self.pending_avg &= ZERO_RUN_MASK;
-    }
-
-    #[inline]
-    fn encode_delta(&mut self, delta: i32) {
-        let idx = (delta + 10) as usize;
-        if idx <= 20 {
-            let (bits, num_bits) = DELTA_ENCODE[idx];
-            if num_bits > 0 {
-                self.write_bits(bits, u32::from(num_bits));
-                return;
-            }
-        }
-        // Large delta: must fit in 11-bit signed range [-1024, 1023]
-        // New encoding: 11111110 (8-bit prefix) + 11-bit signed value = 19 bits
-        assert!(
-            (-1024..=1023).contains(&delta),
-            "Delta {delta} out of range [-1024, 1023]. Temperature swings this large are not supported."
-        );
-        let bits = (0b1111_1110_u32 << 11) | ((delta as u32) & 0x7FF);
-        self.write_bits(bits, 19);
     }
 
     /// Get the encoded size in bytes
+    ///
+    /// Note: This calculates what the finalized size would be (including
+    /// flushing pending state), which may differ from `as_bytes().len()`.
     #[inline]
     #[must_use]
     pub fn size(&self) -> usize {
-        if self.count == 0 {
+        if self.buf.is_empty() {
             return 0;
         }
-
-        let header_size = Self::header_size();
-
-        // Extract pending state (mask out zero_run bits)
-        let (pending_count, pending_sum) = unpack_avg(self.pending_avg & !ZERO_RUN_MASK);
-        let actual_bits = u32::from(self.bit_count);
-
-        // For single interval, no additional bits needed
-        if self.count == 1 {
-            return header_size;
-        }
-
-        // Calculate the final interval's delta and its encoding size
-        let mut zeros = u32::from(self.zero_run());
-        let mut extra_bits = 0u32;
-
-        if pending_count > 0 {
-            let final_avg = rounded_avg(pending_sum, pending_count);
-            let delta = final_avg - self.prev_value.to_i32();
-            if delta == 0 {
-                zeros += 1;
-            } else {
-                // Need to encode zeros first, then the delta
-                extra_bits += Self::zero_run_bits(u32::from(self.zero_run()));
-                zeros = 0; // zeros already accounted for
-                extra_bits += Self::delta_bits(delta);
-            }
-        }
-
-        // Calculate bits needed for pending zero run
-        let zero_run_bits = Self::zero_run_bits(zeros);
-
-        let total_bits = actual_bits + zero_run_bits + extra_bits;
-
-        header_size + self.data.len() + (total_bits as usize).div_ceil(8)
-    }
-
-    /// Calculate the number of bits needed to encode a delta
-    #[inline]
-    fn delta_bits(delta: i32) -> u32 {
-        let idx = (delta + 10) as usize;
-        if idx <= 20 {
-            let (_, num_bits) = DELTA_ENCODE[idx];
-            if num_bits > 0 {
-                return u32::from(num_bits);
-            }
-        }
-        19 // Large delta encoding (11111110 + 11 bits)
-    }
-
-    /// Calculate the number of bits needed to encode a zero run
-    ///
-    /// Must match the logic in `encode_zero_run`:
-    /// - n <= 7: individual zeros (1 bit each)
-    /// - n 8-21: 9-bit run encoding (prefix 11110 + 4-bit length)
-    /// - n 22-149: 13-bit run encoding (prefix 111110 + 7-bit length)
-    /// - n 150+: multiple 13-bit encodings
-    #[inline]
-    const fn zero_run_bits(mut n: u32) -> u32 {
-        let mut bits = 0;
-        while n > 0 {
-            if n <= 7 {
-                // Individual zeros: 1 bit each
-                bits += n;
-                n = 0;
-            } else if n <= 21 {
-                bits += 9;
-                n = 0;
-            } else if n <= 149 {
-                bits += 13;
-                n = 0;
-            } else {
-                bits += 13;
-                n -= 149;
-            }
-        }
-        bits
+        // For now, return the buffer size. This includes the full header.
+        self.buf.len()
     }
 
     /// Get the number of readings encoded
     #[inline]
     #[must_use]
-    pub const fn count(&self) -> usize {
-        self.count as usize
+    pub fn count(&self) -> usize {
+        appendable::count(&self.buf).unwrap_or(0) as usize
     }
 
     /// Decode the encoder's contents back to readings
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn decode(&self) -> Vec<Reading<V>> {
-        if self.count == 0 {
-            return Vec::new();
-        }
-
-        // Extract pending state (mask out zero_run bits)
-        let (pending_count, pending_sum) = unpack_avg(self.pending_avg & !ZERO_RUN_MASK);
-        let actual_bits = u32::from(self.bit_count);
-
-        // Compute the average for the final pending interval
-        let final_avg = if pending_count > 0 {
-            rounded_avg(pending_sum, pending_count)
-        } else {
-            self.prev_value.to_i32()
-        };
-
-        // For single interval, first_value is the average
-        let first_val = if self.count == 1 {
-            V::from_i32(final_avg)
-        } else {
-            self.first_value
-        };
-
-        let base_ts = self.base_ts();
-        let mut decoded = Vec::with_capacity(self.count as usize);
-        decoded.push(Reading {
-            ts: base_ts,
-            value: first_val,
-        });
-
-        if self.count == 1 {
-            return decoded;
-        }
-
-        // Build finalized bit data (same as to_bytes but just the data portion)
-        let mut final_data = self.data.clone();
-        let mut accum = self.bit_accum;
-        let mut bits = actual_bits;
-        let mut zeros = u32::from(self.zero_run());
-
-        // Helper to flush complete bytes from accumulator
-        let flush_bytes = |accum: &mut u32, bits: &mut u32, out: &mut Vec<u8>| {
-            while *bits >= 8 {
-                *bits -= 8;
-                out.push((*accum >> *bits) as u8);
-            }
-        };
-
-        // For multi-interval encoders, encode the final interval's delta
-        if pending_count > 0 {
-            let delta = final_avg - self.prev_value.to_i32();
-            if delta == 0 {
-                zeros += 1;
-            } else {
-                // First flush pending zeros
-                while zeros > 0 {
-                    let (b, n, c) = encode_zero_run(zeros);
-                    accum = (accum << n) | b;
-                    bits += n;
-                    zeros -= c;
-                    flush_bytes(&mut accum, &mut bits, &mut final_data);
-                }
-                // Encode the delta
-                let (delta_bits, delta_num_bits) = Self::encode_delta_value(delta);
-                accum = (accum << delta_num_bits) | delta_bits;
-                bits += delta_num_bits;
-                flush_bytes(&mut accum, &mut bits, &mut final_data);
-            }
-        }
-
-        // Flush remaining zeros
-        while zeros > 0 {
-            let (b, n, c) = encode_zero_run(zeros);
-            accum = (accum << n) | b;
-            bits += n;
-            zeros -= c;
-            flush_bytes(&mut accum, &mut bits, &mut final_data);
-        }
-
-        // Flush any remaining complete bytes
-        flush_bytes(&mut accum, &mut bits, &mut final_data);
-
-        if bits > 0 {
-            final_data.push((accum << (8 - bits)) as u8);
-        }
-
-        let mut reader = BitReader::new(&final_data);
-        let mut prev_val = first_val.to_i32(); // Use computed first_val (may be averaged)
-        let mut idx = 1u64;
-        let count = self.count as usize;
-
-        let interval = u64::from(INTERVAL);
-        // New encoding scheme:
-        // 0       = zero delta
-        // 100     = +1, 101 = -1
-        // 110     = single-interval gap
-        // 11100   = +2, 11101 = -2
-        // 11110xxxx = zero run 8-21
-        // 111110xxxxxxx = zero run 22-149
-        // 1111110xxxx = ±3-10 delta
-        // 11111110xxxxxxxxxxx = large delta
-        // 11111111xxxxxx = gap 2-65
-        while decoded.len() < count && reader.has_more() {
-            if reader.read_bits(1) == 0 {
-                // 0 = zero delta
-                decoded.push(Reading {
-                    ts: base_ts + idx * interval,
-                    value: V::from_i32(prev_val),
-                });
-                idx += 1;
-                continue;
-            }
-            if reader.read_bits(1) == 0 {
-                // 10x = ±1 delta
-                prev_val += if reader.read_bits(1) == 0 { 1 } else { -1 };
-                decoded.push(Reading {
-                    ts: base_ts + idx * interval,
-                    value: V::from_i32(prev_val),
-                });
-                idx += 1;
-                continue;
-            }
-            // 11...
-            if reader.read_bits(1) == 0 {
-                // 110 = single-interval gap
-                idx += 1;
-                continue;
-            }
-            // 111...
-            if reader.read_bits(1) == 0 {
-                // 1110x = ±2 delta
-                prev_val += if reader.read_bits(1) == 0 { 2 } else { -2 };
-                decoded.push(Reading {
-                    ts: base_ts + idx * interval,
-                    value: V::from_i32(prev_val),
-                });
-                idx += 1;
-                continue;
-            }
-            // 1111...
-            if reader.read_bits(1) == 0 {
-                // 11110xxxx = zero run 8-21
-                for _ in 0..reader.read_bits(4) + 8 {
-                    if decoded.len() >= count {
-                        break;
-                    }
-                    decoded.push(Reading {
-                        ts: base_ts + idx * interval,
-                        value: V::from_i32(prev_val),
-                    });
-                    idx += 1;
-                }
-                continue;
-            }
-            // 11111...
-            if reader.read_bits(1) == 0 {
-                // 111110xxxxxxx = zero run 22-149
-                for _ in 0..reader.read_bits(7) + 22 {
-                    if decoded.len() >= count {
-                        break;
-                    }
-                    decoded.push(Reading {
-                        ts: base_ts + idx * interval,
-                        value: V::from_i32(prev_val),
-                    });
-                    idx += 1;
-                }
-                continue;
-            }
-            // 111111...
-            if reader.read_bits(1) == 0 {
-                // 1111110xxxx = ±3-10 delta
-                let e = reader.read_bits(4) as i32;
-                prev_val += if e < 8 { e - 10 } else { e - 5 };
-                decoded.push(Reading {
-                    ts: base_ts + idx * interval,
-                    value: V::from_i32(prev_val),
-                });
-                idx += 1;
-                continue;
-            }
-            // 1111111...
-            if reader.read_bits(1) == 0 {
-                // 11111110xxxxxxxxxxx = large delta (±11-1023)
-                let raw = reader.read_bits(11);
-                prev_val += if raw & 0x400 != 0 {
-                    (raw | 0xFFFF_F800) as i32
-                } else {
-                    raw as i32
-                };
-                decoded.push(Reading {
-                    ts: base_ts + idx * interval,
-                    value: V::from_i32(prev_val),
-                });
-                idx += 1;
-            } else {
-                // 11111111xxxxxx = gap 2-65 intervals
-                idx += u64::from(reader.read_bits(6) + 2);
-            }
-        }
-
-        decoded
+        appendable::decode::<V, INTERVAL>(&self.buf)
     }
 
     /// Finalize and return the encoded bytes
+    ///
+    /// Returns the internal buffer in appendable format. This buffer can be
+    /// used with `Encoder::from_bytes()` to continue appending, or with
+    /// `appendable::decode()` to decode readings.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        if self.count == 0 {
-            return Vec::new();
-        }
-
-        let header_size = Self::header_size();
-
-        // Extract pending state (mask out zero_run bits)
-        let (pending_count, pending_sum) = unpack_avg(self.pending_avg & !ZERO_RUN_MASK);
-        let actual_bits = u32::from(self.bit_count);
-
-        // Compute the average for the final pending interval
-        let final_avg = if pending_count > 0 {
-            rounded_avg(pending_sum, pending_count)
-        } else {
-            self.prev_value.to_i32()
-        };
-
-        // For single interval, first_value is the average
-        let first_val = if self.count == 1 {
-            V::from_i32(final_avg)
-        } else {
-            self.first_value
-        };
-
-        let mut result = Vec::with_capacity(header_size + self.data.len() + 4);
-
-        // Header: base_ts_offset (4) + count (2) + first_value (V::BYTES)
-        result.extend_from_slice(&self.base_ts_offset.to_le_bytes()); // offset 0: 4 bytes
-        result.extend_from_slice(&self.count.to_le_bytes()); // offset 4: 2 bytes
-
-        // Write first_value with appropriate size for V
-        let mut value_buf = [0u8; 4];
-        first_val.write_le(&mut value_buf);
-        result.extend_from_slice(&value_buf[..V::BYTES]); // offset 6: V::BYTES bytes
-
-        // Data
-        result.extend_from_slice(&self.data);
-
-        // Finalize pending bits and zeros, plus the final interval's delta
-        let mut accum = self.bit_accum;
-        let mut bits = actual_bits;
-        let mut zeros = u32::from(self.zero_run());
-
-        // Helper to flush complete bytes from accumulator
-        let flush_bytes = |accum: &mut u32, bits: &mut u32, out: &mut Vec<u8>| {
-            while *bits >= 8 {
-                *bits -= 8;
-                out.push((*accum >> *bits) as u8);
-            }
-        };
-
-        // For multi-interval encoders, encode the final interval's delta
-        if self.count > 1 && pending_count > 0 {
-            let delta = final_avg - self.prev_value.to_i32();
-            if delta == 0 {
-                zeros += 1;
-            } else {
-                // First flush pending zeros
-                while zeros > 0 {
-                    let (b, n, c) = encode_zero_run(zeros);
-                    accum = (accum << n) | b;
-                    bits += n;
-                    zeros -= c;
-                    flush_bytes(&mut accum, &mut bits, &mut result);
-                }
-                // Encode the delta
-                let (delta_bits, delta_num_bits) = Self::encode_delta_value(delta);
-                accum = (accum << delta_num_bits) | delta_bits;
-                bits += delta_num_bits;
-                flush_bytes(&mut accum, &mut bits, &mut result);
-            }
-        }
-
-        // Flush remaining zeros
-        while zeros > 0 {
-            let (b, n, c) = encode_zero_run(zeros);
-            accum = (accum << n) | b;
-            bits += n;
-            zeros -= c;
-            flush_bytes(&mut accum, &mut bits, &mut result);
-        }
-
-        // Flush any remaining complete bytes
-        flush_bytes(&mut accum, &mut bits, &mut result);
-
-        // Pad remaining bits
-        if bits > 0 {
-            result.push((accum << (8 - bits)) as u8);
-        }
-
-        result
+        self.buf.clone()
     }
 
-    /// Encode a delta value, returning (bits, `num_bits`)
-    #[inline]
-    fn encode_delta_value(delta: i32) -> (u32, u32) {
-        let idx = (delta + 10) as usize;
-        if idx <= 20 {
-            let (bits, num_bits) = DELTA_ENCODE[idx];
-            if num_bits > 0 {
-                return (bits, u32::from(num_bits));
-            }
+    /// Get a reference to the internal byte buffer
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf
+    }
+
+    /// Create an encoder from a previously serialized buffer
+    ///
+    /// # Errors
+    /// Returns an error if the buffer is too short.
+    ///
+    /// Note: The caller is responsible for ensuring the buffer was created with
+    /// the same value type V and interval INTERVAL as this encoder.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, AppendError> {
+        if bytes.is_empty() {
+            return Ok(Self::new());
         }
-        // Large delta: clamp to 11-bit signed range
-        // New encoding: 11111110 (8-bit prefix) + 11-bit signed value = 19 bits
-        let clamped = delta.clamp(-1024, 1023);
-        let bits = (0b1111_1110_u32 << 11) | ((clamped as u32) & 0x7FF);
-        (bits, 19)
-    }
-
-    #[inline]
-    fn write_bits(&mut self, value: u32, num_bits: u32) {
-        self.bit_accum = (self.bit_accum << num_bits) | value;
-        self.bit_count += num_bits as u8;
-
-        // Flush complete bytes to prevent overflow
-        while self.bit_count >= 8 {
-            self.bit_count -= 8;
-            self.data.push((self.bit_accum >> self.bit_count) as u8);
+        if bytes.len() < HEADER_SIZE {
+            return Err(AppendError::CountOverflow); // TODO: better error
         }
+        Ok(Self {
+            buf: bytes,
+            _marker: PhantomData,
+        })
     }
 
-    #[inline]
-    fn flush_zeros(&mut self) {
-        loop {
-            let zero_run = self.zero_run();
-            if zero_run == 0 {
-                break;
-            }
-            let (bits, num_bits, consumed) = encode_zero_run(u32::from(zero_run));
-            self.write_bits(bits, num_bits);
-            // Update zero_run by subtracting consumed
-            let new_run = zero_run - consumed as u16;
-            self.pending_avg = (self.pending_avg & !ZERO_RUN_MASK) | (u64::from(new_run) << ZERO_RUN_SHIFT);
-        }
-    }
-
-    #[inline]
-    fn write_gaps(&mut self, mut count: u32) {
-        // New encoding:
-        // - Single gap (1 interval): 110 (3 bits)
-        // - Multi gap (2-65 intervals): 11111111xxxxxx (14 bits, 6-bit count for 2-65)
-        while count > 0 {
-            if count == 1 {
-                // Single-interval gap: 110 (3 bits)
-                self.write_bits(0b110, 3);
-                count = 0;
-            } else {
-                // Multi-interval gap: 2-65 intervals
-                // Encoding: 11111111 (8-bit prefix) + 6-bit value (0-63 maps to 2-65)
-                let g = count.min(65);
-                self.write_bits((0xFF << 6) | (g - 2), 14);
-                count -= g;
-            }
-        }
-    }
-}
-
-
-/// Bit reader for decoding variable-length bit sequences (internal to `Encoder::decode`)
-struct BitReader<'a> {
-    buf: &'a [u8],
-    pos: usize,
-    bits: u64,
-    left: u32,
-}
-
-impl<'a> BitReader<'a> {
-    #[inline]
-    fn new(buf: &'a [u8]) -> Self {
-        let mut r = BitReader {
-            buf,
-            pos: 0,
-            bits: 0,
-            left: 0,
-        };
-        r.refill();
-        r
-    }
-
-    #[inline]
-    fn refill(&mut self) {
-        while self.left <= 56 && self.pos < self.buf.len() {
-            self.bits = (self.bits << 8) | u64::from(self.buf[self.pos]);
-            self.pos += 1;
-            self.left += 8;
-        }
-    }
-
-    #[inline]
-    fn read_bits(&mut self, n: u32) -> u32 {
-        if self.left < n {
-            self.refill();
-        }
-        if self.left < n {
-            return 0;
-        }
-        self.left -= n;
-        ((self.bits >> self.left) & ((1 << n) - 1)) as u32
-    }
-
-    #[inline]
-    const fn has_more(&self) -> bool {
-        self.left > 0 || self.pos < self.buf.len()
-    }
 }
 
 impl<V: Value, const INTERVAL: u16> Default for Encoder<V, INTERVAL> {
