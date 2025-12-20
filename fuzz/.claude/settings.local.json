@@ -30,7 +30,8 @@
       "Bash(for target in fuzz_decode fuzz_roundtrip fuzz_gaps fuzz_idempotent fuzz_lossy_bounds fuzz_single_reading fuzz_averaging fuzz_lossless)",
       "Bash(timeout 10s cargo +nightly fuzz run:*)",
       "Bash(timeout 35s cargo +nightly fuzz run:*)",
-      "Bash(head:*)"
+      "Bash(head:*)",
+      "WebFetch(domain:docs.rs)"
     ],
     "deny": [],
     "ask": []
