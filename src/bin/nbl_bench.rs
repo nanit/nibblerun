@@ -7,6 +7,7 @@ use std::fs::{self, File};
 use std::hint::black_box;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tikv_jemalloc_ctl::{epoch, stats};
 
 #[global_allocator]
@@ -177,8 +178,8 @@ fn run_nibblerun_hashmap(readings: &[(u32, u32, i8)]) -> (HashMap<u32, Vec<u8>>,
     let avg_capacity = total_capacity / storage.len();
 
     println!("  Stored {} devices (HashMap capacity: {})", storage.len(), storage.capacity());
-    println!("  Compressed data: {} KB total, {} bytes avg per device", total_data / 1024, avg_data);
-    println!("  Vec capacity: {} KB total, {} bytes avg per device", total_capacity / 1024, avg_capacity);
+    println!("  Compressed data: {:.1} MB total, {} bytes avg per device", total_data as f64 / (1024.0 * 1024.0), avg_data);
+    println!("  Vec capacity: {:.1} MB total, {} bytes avg per device", total_capacity as f64 / (1024.0 * 1024.0), avg_capacity);
 
     (storage, total_data)
 }
@@ -203,8 +204,8 @@ fn run_nibblerun_btreemap(readings: &[(u32, u32, i8)]) -> (BTreeMap<u32, Vec<u8>
     let avg_capacity = total_capacity / storage.len();
 
     println!("  Stored {} devices", storage.len());
-    println!("  Compressed data: {} KB total, {} bytes avg per device", total_data / 1024, avg_data);
-    println!("  Vec capacity: {} KB total, {} bytes avg per device", total_capacity / 1024, avg_capacity);
+    println!("  Compressed data: {:.1} MB total, {} bytes avg per device", total_data as f64 / (1024.0 * 1024.0), avg_data);
+    println!("  Vec capacity: {:.1} MB total, {} bytes avg per device", total_capacity as f64 / (1024.0 * 1024.0), avg_capacity);
 
     (storage, total_data)
 }
@@ -234,55 +235,66 @@ fn main() {
     // Expected size: each reading is (u32 ts + i8 val + padding) = 8 bytes per reading
     // But stored as (u32, i8) tuple which is 8 bytes with padding
     let expected_bytes = interleaved.len() * 8;
-    println!("Expected naive size: {} KB ({} readings * 8 bytes)", expected_bytes / 1024, interleaved.len());
+    println!("Expected naive size: {:.1} MB ({} readings * 8 bytes)", expected_bytes as f64 / (1024.0 * 1024.0), interleaved.len());
     println!();
 
     let before = get_allocated();
+    let start = Instant::now();
 
     let (name, compressed_data): (&str, Option<usize>) = match args.benchmark {
         BenchmarkType::Naive => {
             println!("Running naive benchmark...");
             let storage = run_naive(&interleaved);
+            let encode_duration = start.elapsed();
             let after = get_allocated();
             let allocated = after.saturating_sub(before);
-            print_results("naive", expected_bytes, allocated, None);
+            print_results("naive", expected_bytes, allocated, None, interleaved.len(), encode_duration);
             black_box(storage);
             return;
         }
         BenchmarkType::NibblerunHashmap => {
             println!("Running nibblerun-hashmap benchmark...");
             let (storage, data_size) = run_nibblerun_hashmap(&interleaved);
+            let encode_duration = start.elapsed();
             let after = get_allocated();
             let allocated = after.saturating_sub(before);
-            print_results("nibblerun-hashmap", expected_bytes, allocated, Some(data_size));
+            print_results("nibblerun-hashmap", expected_bytes, allocated, Some(data_size), interleaved.len(), encode_duration);
             black_box(storage);
             return;
         }
         BenchmarkType::NibblerunBtreemap => {
             println!("Running nibblerun-btreemap benchmark...");
             let (storage, data_size) = run_nibblerun_btreemap(&interleaved);
+            let encode_duration = start.elapsed();
             let after = get_allocated();
             let allocated = after.saturating_sub(before);
-            print_results("nibblerun-btreemap", expected_bytes, allocated, Some(data_size));
+            print_results("nibblerun-btreemap", expected_bytes, allocated, Some(data_size), interleaved.len(), encode_duration);
             black_box(storage);
             return;
         }
     };
 }
 
-fn print_results(name: &str, expected_bytes: usize, allocated: usize, compressed_data: Option<usize>) {
+fn print_results(name: &str, expected_bytes: usize, allocated: usize, compressed_data: Option<usize>, total_readings: usize, encode_duration: Duration) {
     let ratio = expected_bytes as f64 / allocated as f64;
+    let encode_rate_m = total_readings as f64 / encode_duration.as_secs_f64() / 1_000_000.0;
+    let expected_mb = expected_bytes as f64 / (1024.0 * 1024.0);
+    let allocated_mb = allocated as f64 / (1024.0 * 1024.0);
     println!();
 
     if let Some(data_size) = compressed_data {
         let overhead = allocated.saturating_sub(data_size);
         let data_ratio = expected_bytes as f64 / data_size as f64;
-        println!("Benchmark: {} | Expected: {} KB | Allocated: {} KB | Ratio: {:.1}x",
-                 name, expected_bytes / 1024, allocated / 1024, ratio);
-        println!("Compressed data: {} KB | Overhead: {} KB | Data ratio: {:.1}x",
-                 data_size / 1024, overhead / 1024, data_ratio);
+        let data_mb = data_size as f64 / (1024.0 * 1024.0);
+        let overhead_mb = overhead as f64 / (1024.0 * 1024.0);
+        println!("Benchmark: {} | Expected: {:.1} MB | Allocated: {:.1} MB | Ratio: {:.1}x",
+                 name, expected_mb, allocated_mb, ratio);
+        println!("Compressed data: {:.1} MB | Overhead: {:.1} MB | Data ratio: {:.1}x",
+                 data_mb, overhead_mb, data_ratio);
     } else {
-        println!("Benchmark: {} | Expected: {} KB | Allocated: {} KB | Ratio: {:.1}x",
-                 name, expected_bytes / 1024, allocated / 1024, ratio);
+        println!("Benchmark: {} | Expected: {:.1} MB | Allocated: {:.1} MB | Ratio: {:.1}x",
+                 name, expected_mb, allocated_mb, ratio);
     }
+    println!("Encode rate: {:.1}M readings/sec ({:.2}s for {} readings)",
+             encode_rate_m, encode_duration.as_secs_f64(), total_readings);
 }
