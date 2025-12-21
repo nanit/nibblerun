@@ -2,18 +2,12 @@
 
 use clap::{Parser, ValueEnum};
 use rand::Rng;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, File};
 use std::hint::black_box;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use tikv_jemalloc_ctl::{epoch, stats};
-
-/// Storage result from benchmarks
-enum Storage {
-    Naive(HashMap<u32, Vec<(u32, i8)>>),
-    NibblerunHashmap(HashMap<u32, Vec<u8>>),
-}
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -22,6 +16,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 enum BenchmarkType {
     Naive,
     NibblerunHashmap,
+    NibblerunBtreemap,
 }
 
 #[derive(Parser)]
@@ -163,8 +158,8 @@ fn run_naive(readings: &[(u32, u32, i8)]) -> HashMap<u32, Vec<(u32, i8)>> {
 }
 
 /// NibbleRun storage: HashMap<u32, Vec<u8>>
-/// Returns the storage to keep it alive for memory measurement
-fn run_nibblerun_hashmap(readings: &[(u32, u32, i8)]) -> HashMap<u32, Vec<u8>> {
+/// Returns the storage and compressed data size
+fn run_nibblerun_hashmap(readings: &[(u32, u32, i8)]) -> (HashMap<u32, Vec<u8>>, usize) {
     let mut storage: HashMap<u32, Vec<u8>> = HashMap::new();
     for &(device_id, ts, val) in readings {
         if let Some(buf) = storage.get_mut(&device_id) {
@@ -174,8 +169,44 @@ fn run_nibblerun_hashmap(readings: &[(u32, u32, i8)]) -> HashMap<u32, Vec<u8>> {
             storage.insert(device_id, buf);
         }
     }
+
+    // Calculate actual compressed data size and capacity
+    let total_data: usize = storage.values().map(|v| v.len()).sum();
+    let total_capacity: usize = storage.values().map(|v| v.capacity()).sum();
+    let avg_data = total_data / storage.len();
+    let avg_capacity = total_capacity / storage.len();
+
+    println!("  Stored {} devices (HashMap capacity: {})", storage.len(), storage.capacity());
+    println!("  Compressed data: {} KB total, {} bytes avg per device", total_data / 1024, avg_data);
+    println!("  Vec capacity: {} KB total, {} bytes avg per device", total_capacity / 1024, avg_capacity);
+
+    (storage, total_data)
+}
+
+/// NibbleRun storage: BTreeMap<u32, Vec<u8>>
+/// Returns the storage and compressed data size
+fn run_nibblerun_btreemap(readings: &[(u32, u32, i8)]) -> (BTreeMap<u32, Vec<u8>>, usize) {
+    let mut storage: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+    for &(device_id, ts, val) in readings {
+        if let Some(buf) = storage.get_mut(&device_id) {
+            let _ = nibblerun::appendable::append::<i8, 300>(buf, ts as u64, val);
+        } else {
+            let buf = nibblerun::appendable::create::<i8, 300>(ts as u64, val);
+            storage.insert(device_id, buf);
+        }
+    }
+
+    // Calculate actual compressed data size and capacity
+    let total_data: usize = storage.values().map(|v| v.len()).sum();
+    let total_capacity: usize = storage.values().map(|v| v.capacity()).sum();
+    let avg_data = total_data / storage.len();
+    let avg_capacity = total_capacity / storage.len();
+
     println!("  Stored {} devices", storage.len());
-    storage
+    println!("  Compressed data: {} KB total, {} bytes avg per device", total_data / 1024, avg_data);
+    println!("  Vec capacity: {} KB total, {} bytes avg per device", total_capacity / 1024, avg_capacity);
+
+    (storage, total_data)
 }
 
 fn main() {
@@ -208,22 +239,50 @@ fn main() {
 
     let before = get_allocated();
 
-    let (name, storage) = match args.benchmark {
+    let (name, compressed_data): (&str, Option<usize>) = match args.benchmark {
         BenchmarkType::Naive => {
             println!("Running naive benchmark...");
-            ("naive", Storage::Naive(run_naive(&interleaved)))
+            let storage = run_naive(&interleaved);
+            let after = get_allocated();
+            let allocated = after.saturating_sub(before);
+            print_results("naive", expected_bytes, allocated, None);
+            black_box(storage);
+            return;
         }
         BenchmarkType::NibblerunHashmap => {
             println!("Running nibblerun-hashmap benchmark...");
-            ("nibblerun-hashmap", Storage::NibblerunHashmap(run_nibblerun_hashmap(&interleaved)))
+            let (storage, data_size) = run_nibblerun_hashmap(&interleaved);
+            let after = get_allocated();
+            let allocated = after.saturating_sub(before);
+            print_results("nibblerun-hashmap", expected_bytes, allocated, Some(data_size));
+            black_box(storage);
+            return;
+        }
+        BenchmarkType::NibblerunBtreemap => {
+            println!("Running nibblerun-btreemap benchmark...");
+            let (storage, data_size) = run_nibblerun_btreemap(&interleaved);
+            let after = get_allocated();
+            let allocated = after.saturating_sub(before);
+            print_results("nibblerun-btreemap", expected_bytes, allocated, Some(data_size));
+            black_box(storage);
+            return;
         }
     };
+}
 
-    let after = get_allocated();
-    let allocated = after.saturating_sub(before);
+fn print_results(name: &str, expected_bytes: usize, allocated: usize, compressed_data: Option<usize>) {
     let ratio = expected_bytes as f64 / allocated as f64;
     println!();
-    println!("Benchmark: {} | Expected: {} KB | Allocated: {} KB | Ratio: {:.1}x",
-             name, expected_bytes / 1024, allocated / 1024, ratio);
-    black_box(storage);
+
+    if let Some(data_size) = compressed_data {
+        let overhead = allocated.saturating_sub(data_size);
+        let data_ratio = expected_bytes as f64 / data_size as f64;
+        println!("Benchmark: {} | Expected: {} KB | Allocated: {} KB | Ratio: {:.1}x",
+                 name, expected_bytes / 1024, allocated / 1024, ratio);
+        println!("Compressed data: {} KB | Overhead: {} KB | Data ratio: {:.1}x",
+                 data_size / 1024, overhead / 1024, data_ratio);
+    } else {
+        println!("Benchmark: {} | Expected: {} KB | Allocated: {} KB | Ratio: {:.1}x",
+                 name, expected_bytes / 1024, allocated / 1024, ratio);
+    }
 }
