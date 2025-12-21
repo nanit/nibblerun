@@ -189,7 +189,7 @@ macro_rules! proptest_interval {
                     }
                 }
 
-                /// Property: multiple readings in same interval are averaged correctly
+                /// Property: multiple readings in same interval keep the last value
                 #[test]
                 fn prop_averaging_within_interval(
                     interval_temps in prop::collection::vec(
@@ -212,17 +212,12 @@ macro_rules! proptest_interval {
                         "Expected {} intervals, got {}", interval_temps.len(), decoded.len());
 
                     for (i, (reading, temps)) in decoded.iter().zip(interval_temps.iter()).enumerate() {
-                        let sum: i32 = temps.iter().sum();
-                        let count = temps.len() as i32;
-                        let expected_avg = if sum >= 0 {
-                            (sum + count / 2) / count
-                        } else {
-                            (sum - count / 2) / count
-                        };
+                        // Keep-last semantics: expect the last value in each interval
+                        let expected_last = *temps.last().unwrap();
 
-                        prop_assert_eq!(reading.value, expected_avg,
-                            "Interval {}: expected avg {} (sum={}, count={}), got {}",
-                            i, expected_avg, sum, count, reading.value);
+                        prop_assert_eq!(reading.value, expected_last,
+                            "Interval {}: expected last value {}, got {}",
+                            i, expected_last, reading.value);
                     }
                 }
 

@@ -75,7 +75,8 @@ impl SpanKind {
             | BitSpanKind::HeaderPrevLogicalIdx(_)
             | BitSpanKind::HeaderFirstValue(_)
             | BitSpanKind::HeaderPrevValue(_)
-            | BitSpanKind::HeaderPendingAvg(_)
+            | BitSpanKind::HeaderCurrentValue(_)
+            | BitSpanKind::HeaderZeroRun(_)
             | BitSpanKind::HeaderBitCount(_)
             | BitSpanKind::HeaderBitAccum(_) => colors::HEADER,
             BitSpanKind::Zero => colors::ZERO,
@@ -96,7 +97,8 @@ impl SpanKind {
             BitSpanKind::HeaderPrevLogicalIdx(v) => format!("prev_idx: {v}"),
             BitSpanKind::HeaderFirstValue(v) => format!("first_val: {v}"),
             BitSpanKind::HeaderPrevValue(v) => format!("prev_val: {v}"),
-            BitSpanKind::HeaderPendingAvg(v) => format!("pending_avg: {v:#x}"),
+            BitSpanKind::HeaderCurrentValue(v) => format!("curr_val: {v}"),
+            BitSpanKind::HeaderZeroRun(v) => format!("zero_run: {v}"),
             BitSpanKind::HeaderBitCount(v) => format!("bit_count: {v}"),
             BitSpanKind::HeaderBitAccum(v) => format!("bit_accum: {v:#x}"),
             BitSpanKind::Zero => "=0".to_string(),
@@ -118,7 +120,8 @@ impl SpanKind {
             BitSpanKind::HeaderPrevLogicalIdx(v) => format!("prev_logical_idx: {v}"),
             BitSpanKind::HeaderFirstValue(v) => format!("first_value: {v}"),
             BitSpanKind::HeaderPrevValue(v) => format!("prev_value: {v}"),
-            BitSpanKind::HeaderPendingAvg(v) => format!("pending_avg: {v:#018x}"),
+            BitSpanKind::HeaderCurrentValue(v) => format!("current_value: {v}"),
+            BitSpanKind::HeaderZeroRun(v) => format!("zero_run: {v}"),
             BitSpanKind::HeaderBitCount(v) => format!("bit_count: {v}"),
             BitSpanKind::HeaderBitAccum(v) => format!("bit_accum: {v:#04x}"),
             BitSpanKind::Zero => format!("{ts_str} val={value} (=0)"),
@@ -141,7 +144,8 @@ impl SpanKind {
             | BitSpanKind::HeaderPrevLogicalIdx(_)
             | BitSpanKind::HeaderFirstValue(_)
             | BitSpanKind::HeaderPrevValue(_)
-            | BitSpanKind::HeaderPendingAvg(_)
+            | BitSpanKind::HeaderCurrentValue(_)
+            | BitSpanKind::HeaderZeroRun(_)
             | BitSpanKind::HeaderBitCount(_)
             | BitSpanKind::HeaderBitAccum(_) => vec![],
             BitSpanKind::Zero => {
@@ -181,7 +185,8 @@ impl SpanKind {
                 | BitSpanKind::HeaderPrevLogicalIdx(_)
                 | BitSpanKind::HeaderFirstValue(_)
                 | BitSpanKind::HeaderPrevValue(_)
-                | BitSpanKind::HeaderPendingAvg(_)
+                | BitSpanKind::HeaderCurrentValue(_)
+                | BitSpanKind::HeaderZeroRun(_)
                 | BitSpanKind::HeaderBitCount(_)
                 | BitSpanKind::HeaderBitAccum(_)
         )
@@ -782,17 +787,18 @@ fn render_legend(legend_x: usize) -> String {
     ));
     y += 16;
 
-    // Header layout for i8 value type (20 bytes):
+    // Header layout for i8 value type (14 bytes):
     // [0-3] base_ts_offset, [4-5] count, [6-7] prev_logical_idx,
-    // [8] first_value, [9] prev_value, [10-17] pending_avg,
-    // [18] bit_count, [19] bit_accum
+    // [8] first_value, [9] prev_value, [10] current_value,
+    // [11] zero_run, [12] bit_count, [13] bit_accum
     let header_fields = [
         ("base_ts_offset", "4 bytes", colors::HEADER),
         ("count", "2 bytes", colors::HEADER),
         ("prev_logical_idx", "2 bytes", colors::HEADER),
-        ("first_value", "1 byte", colors::HEADER),
-        ("prev_value", "1 byte", colors::HEADER),
-        ("pending_avg", "8 bytes", colors::HEADER),
+        ("first_value", "V::BYTES", colors::HEADER),
+        ("prev_value", "V::BYTES", colors::HEADER),
+        ("current_value", "V::BYTES", colors::HEADER),
+        ("zero_run", "1 byte", colors::HEADER),
         ("bit_count", "1 byte", colors::HEADER),
         ("bit_accum", "1 byte", colors::HEADER),
     ];

@@ -364,13 +364,13 @@ fn test_specific_day_with_jitter() {
     // 00:00:03 -> temp 25 (logical idx 0)
     // 00:05:10 -> temp 25 (logical idx 1)
     // 00:10:20 -> temp 26 (logical idx 2)
-    // 00:15:02 -> temp 25 (logical idx 2 - SKIPPED, same as previous)
+    // 00:15:02 -> temp 25 (logical idx 2 - same interval, keep-last replaces 26 with 25)
     // 01:35:05 -> temp 26 (logical idx 19)
     let inputs: [(u64, i32); 5] = [
         (day_start + 0 * 60 + 3, 25),   // 00:00:03
         (day_start + 5 * 60 + 10, 25),  // 00:05:10
         (day_start + 10 * 60 + 20, 26), // 00:10:20
-        (day_start + 15 * 60 + 2, 25),  // 00:15:02 - will be skipped
+        (day_start + 15 * 60 + 2, 25),  // 00:15:02 - same interval as above
         (day_start + 95 * 60 + 5, 26),  // 01:35:05
     ];
 
@@ -381,22 +381,22 @@ fn test_specific_day_with_jitter() {
 
     let decoded = encoder.decode();
 
-    // Only 4 readings - the 4th input is skipped (same logical index as 3rd)
-    assert_eq!(decoded.len(), 4);
-
     // Input analysis (base_ts = day_start + 3 = 1764547203):
-    // Reading 0: ts=1764547203, logical_idx=0
-    // Reading 1: ts=1764547510, logical_idx=1
-    // Reading 2: ts=1764547820, logical_idx=2
-    // Reading 3: ts=1764548102, logical_idx=2 -> SKIPPED (duplicate)
-    // Reading 4: ts=1764552905, logical_idx=19
+    // Reading 0: ts=1764547203, logical_idx = 0 / 300 = 0
+    // Reading 1: ts=1764547510, logical_idx = 307 / 300 = 1
+    // Reading 2: ts=1764547820, logical_idx = 617 / 300 = 2
+    // Reading 3: ts=1764548102, logical_idx = 899 / 300 = 2 (same interval!)
+    // Reading 4: ts=1764552905, logical_idx = 5702 / 300 = 19
+
+    // Only 4 readings - reading 3 replaces reading 2 (same interval, keep-last)
+    assert_eq!(decoded.len(), 4);
 
     let base_ts = inputs[0].0;
 
     let expected: [(u64, i32); 4] = [
         (base_ts + 0 * 300, 25),  // logical idx 0
         (base_ts + 1 * 300, 25),  // logical idx 1
-        (base_ts + 2 * 300, 26),  // logical idx 2
+        (base_ts + 2 * 300, 25),  // logical idx 2 - keep-last: 25 replaced 26
         (base_ts + 19 * 300, 26), // logical idx 19 (gap of 17 from idx 2)
     ];
 
@@ -751,74 +751,73 @@ fn test_duplicate_day_events_with_different_timestamps_return_error() {
 }
 
 #[test]
-fn test_duplicate_timestamps_averaged() {
+fn test_duplicate_timestamps_keep_last() {
     let base_ts = 1761955455u64;
     let mut encoder = Encoder::<i32>::new();
 
     encoder.append(base_ts, 22).unwrap();
-    encoder.append(base_ts, 23).unwrap(); // Same interval - will be averaged
-    encoder.append(base_ts + 5, 24).unwrap(); // Same logical index (within same 300s interval)
+    encoder.append(base_ts, 23).unwrap(); // Same interval - keep last
+    encoder.append(base_ts + 5, 24).unwrap(); // Same logical index - keep last
     encoder.append(base_ts + 300, 25).unwrap(); // Next interval
 
     let decoded = encoder.decode();
 
-    // Two intervals: first averaged (22+23+24)/3 = 23, second = 25
+    // Two intervals: first keeps last value (24), second = 25
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].value, 23); // (22+23+24+1)/3 = 23 (round half up)
+    assert_eq!(decoded[0].value, 24); // keep-last semantics
     assert_eq!(decoded[1].value, 25);
 }
 
 #[test]
-fn test_averaging_round_half_up() {
+fn test_keep_last_semantics() {
     let base_ts = 1761955455u64;
 
-    // Test case: 22 + 23 = 45, (45 + 1) / 2 = 23 (rounds up)
+    // Test case: two values - keep last
     let mut encoder = Encoder::<i32>::new();
     encoder.append(base_ts, 22).unwrap();
     encoder.append(base_ts + 1, 23).unwrap();
     let decoded = encoder.decode();
-    assert_eq!(decoded[0].value, 23);
+    assert_eq!(decoded[0].value, 23); // keep last
 
-    // Test case: 22 + 22 + 23 = 67, (67 + 1) / 3 = 22 (rounds down)
+    // Test case: three values - keep last
     let mut encoder = Encoder::<i32>::new();
     encoder.append(base_ts, 22).unwrap();
     encoder.append(base_ts + 1, 22).unwrap();
     encoder.append(base_ts + 2, 23).unwrap();
     let decoded = encoder.decode();
-    assert_eq!(decoded[0].value, 22);
+    assert_eq!(decoded[0].value, 23); // keep last
 
-    // Test case: 20 + 21 + 22 + 23 = 86, (86 + 2) / 4 = 22
+    // Test case: four values - keep last
     let mut encoder = Encoder::<i32>::new();
     encoder.append(base_ts, 20).unwrap();
     encoder.append(base_ts + 1, 21).unwrap();
     encoder.append(base_ts + 2, 22).unwrap();
     encoder.append(base_ts + 3, 23).unwrap();
     let decoded = encoder.decode();
-    assert_eq!(decoded[0].value, 22);
+    assert_eq!(decoded[0].value, 23); // keep last
 
-    // Test case: negative temperatures - (-16) + (-16) = -32, (-32 - 1) / 2 = -16
-    // This tests that rounding works correctly for negative numbers
+    // Test case: negative temperatures - keep last
     let mut encoder = Encoder::<i32>::new();
     encoder.append(base_ts, -16).unwrap();
-    encoder.append(base_ts + 1, -16).unwrap();
+    encoder.append(base_ts + 1, -17).unwrap();
     let decoded = encoder.decode();
-    assert_eq!(decoded[0].value, -16);
+    assert_eq!(decoded[0].value, -17); // keep last
 
-    // Test case: negative with rounding - (-15) + (-16) = -31, (-31 - 1) / 2 = -16
+    // Test case: negative with different values - keep last
     let mut encoder = Encoder::<i32>::new();
     encoder.append(base_ts, -15).unwrap();
     encoder.append(base_ts + 1, -16).unwrap();
     let decoded = encoder.decode();
-    assert_eq!(decoded[0].value, -16); // rounds away from zero
+    assert_eq!(decoded[0].value, -16); // keep last
 }
 
 #[test]
-fn test_alternating_readings_same_interval_averaged() {
+fn test_alternating_readings_same_interval_keep_last() {
     let base_ts = 1761955455u64;
     let mut encoder = Encoder::<i32>::new();
 
     // 10 readings alternating 25, 21 spread across 5 intervals (2 per interval)
-    // Each interval: 25 + 21 = 46, (46 + 1) / 2 = 23 (round half up)
+    // Each interval keeps last value: 21
     let readings = [25, 21, 25, 21, 25, 21, 25, 21, 25, 21];
     for (i, &temp) in readings.iter().enumerate() {
         // 2 readings per 300s interval: readings 0,1 in interval 0, 2,3 in interval 1, etc.
@@ -834,17 +833,17 @@ fn test_alternating_readings_same_interval_averaged() {
 
     let decoded = encoder.decode();
 
-    // Should be 5 readings, all with averaged value 23
+    // Should be 5 readings, all with keep-last value 21
     assert_eq!(
         decoded.len(),
         5,
-        "expected 5 averaged readings, got {}",
+        "expected 5 keep-last readings, got {}",
         decoded.len()
     );
     for (i, reading) in decoded.iter().enumerate() {
         assert_eq!(
-            reading.value, 23,
-            "expected temp 23 at index {}, got {}",
+            reading.value, 21,
+            "expected temp 21 (keep-last) at index {}, got {}",
             i, reading.value
         );
         assert_eq!(
@@ -857,7 +856,7 @@ fn test_alternating_readings_same_interval_averaged() {
 
     // Size check: with appendable format, bits stay in header's bit_accum until 8+ bits
     // 4 zeros = 4 bits, which stays in the header (not yet flushed to data section)
-    // So buffer is just header_size for i32 (26 bytes)
+    // So buffer is just header_size for i32
     let expected_header_size = header_size_for_value_bytes(i32::BYTES);
     let size = encoder.size();
     assert_eq!(
@@ -897,19 +896,19 @@ fn test_custom_interval() {
 }
 
 #[test]
-fn test_custom_interval_averaging() {
+fn test_custom_interval_keep_last() {
     let base_ts = 1761955455u64;
 
-    // Test averaging with 60-second interval
+    // Test keep-last with 60-second interval
     let mut enc = Encoder::<i32, 60>::new();
 
     // Two readings in same 60-second interval
     enc.append(base_ts, 20).unwrap();
-    enc.append(base_ts + 30, 24).unwrap(); // Same interval, should average to 22
+    enc.append(base_ts + 30, 24).unwrap(); // Same interval, should keep last (24)
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 1);
-    assert_eq!(decoded[0].value, 22); // (20 + 24) / 2 = 22
+    assert_eq!(decoded[0].value, 24); // keep-last semantics
 }
 
 #[test]
@@ -1293,14 +1292,15 @@ fn test_large_timestamp_offset() {
 
 #[test]
 fn test_decode_truncated_header() {
-    // Header size for i32: 4 + 2 + 2 + 4 + 4 + 8 + 1 + 1 = 26 bytes
+    // Header size for i32: 4 + 2 + 2 + 4 + 4 + 4 + 1 + 1 + 1 = 23 bytes
+    // (base_ts_offset + count + prev_logical_idx + first_value + prev_value + current_value + zero_run + bit_count + bit_accum)
     let i32_header_size = header_size_for_value_bytes(i32::BYTES);
-    assert_eq!(i32_header_size, 26);
+    assert_eq!(i32_header_size, 23);
 
     // < header_size should return empty vec
     assert!(decode::<i32, 300>(&[]).is_empty());
     assert!(decode::<i32, 300>(&[0]).is_empty());
-    assert!(decode::<i32, 300>(&[0; 25]).is_empty());
+    assert!(decode::<i32, 300>(&[0; 22]).is_empty());
 
     // Exactly header_size bytes is valid header
     let mut header = vec![0u8; i32_header_size];
@@ -1308,23 +1308,19 @@ fn test_decode_truncated_header() {
     let decoded = decode::<i32, 300>(&header);
     assert!(decoded.is_empty());
 
-    // Set count to 1, first_value as i32
-    // i32 header layout (26 bytes):
+    // Set count to 1, current_value as i32
+    // i32 header layout (23 bytes):
     // [0-3] base_ts_offset, [4-5] count, [6-7] prev_logical_idx,
-    // [8-11] first_value, [12-15] prev_value, [16-23] pending_avg,
-    // [24] bit_count, [25] bit_accum
+    // [8-11] first_value, [12-15] prev_value, [16-19] current_value,
+    // [20] zero_run, [21] bit_count, [22] bit_accum
     header[4] = 1;    // count = 1
     header[5] = 0;
-    // first_value = 22 as i32 little-endian (bytes 8-11)
-    header[8] = 22;
-    header[9] = 0;
-    header[10] = 0;
-    header[11] = 0;
-    // pending_avg = pack_avg(1, 22) = (22 << 10) | 1 = 22529
-    // As u64 little-endian at offset 16-23
-    let pending_avg: u64 = (22_u64 << 10) | 1;
-    let pending_bytes = pending_avg.to_le_bytes();
-    header[16..24].copy_from_slice(&pending_bytes);
+    // current_value = 22 as i32 little-endian (bytes 16-19)
+    // For count==1, decode uses current_value
+    header[16] = 22;
+    header[17] = 0;
+    header[18] = 0;
+    header[19] = 0;
     let decoded = decode::<i32, 300>(&header);
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].value, 22);
@@ -1371,7 +1367,7 @@ fn test_decode_zero_interval() {
 
 #[test]
 fn test_31_readings_same_interval() {
-    // Test 31 readings in the same interval (legacy test, still valid)
+    // Test 31 readings in the same interval - keep-last semantics
     let base_ts = 1761955455u64;
     let mut enc = Encoder::<i32>::new();
 
@@ -1386,11 +1382,8 @@ fn test_31_readings_same_interval() {
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
 
-    // Average of 31 readings with temps 20-29 (repeating 3x + 20)
-    // Sum = (20+21+22+23+24+25+26+27+28+29) * 3 + 20 = 245 * 3 + 20 = 755
-    // Avg = 755 / 31 = 24.35... ≈ 24
-    let expected_avg = (0..31).map(|i| 20 + (i % 10)).sum::<i32>() / 31;
-    assert_eq!(decoded[0].value, expected_avg);
+    // Keep-last semantics: last value is 20 + (30 % 10) = 20
+    assert_eq!(decoded[0].value, 20);
 }
 
 #[test]
@@ -1415,7 +1408,7 @@ fn test_32_readings_same_interval() {
 
 #[test]
 fn test_100_readings_same_interval() {
-    // Test 100 readings in the same interval
+    // Test 100 readings in the same interval - keep-last semantics
     let base_ts = 1761955455u64;
     let mut enc = Encoder::<i32>::new();
 
@@ -1430,8 +1423,8 @@ fn test_100_readings_same_interval() {
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
-    // Average of 50 x 20 + 50 x 30 = 1000 + 1500 = 2500 / 100 = 25
-    assert_eq!(decoded[0].value, 25);
+    // Keep-last: last value is i=99, which is odd, so temp=30
+    assert_eq!(decoded[0].value, 30);
 }
 
 #[test]
@@ -1455,8 +1448,7 @@ fn test_500_readings_same_interval() {
 
 #[test]
 fn test_1023_readings_same_interval() {
-    // Test max pending_count = 1023 (10 bits)
-    // Use 1-second interval so all 1023 readings fit in one interval
+    // Test many readings in same interval - keep-last semantics
     let base_ts = 1761955455u64;
     let mut enc = Encoder::<i32, 2000>::new(); // 2000 second interval
 
@@ -1471,35 +1463,28 @@ fn test_1023_readings_same_interval() {
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
 
-    // Average of 1023 readings with temps 20-29 (102 complete cycles + partial)
-    let expected_sum: i32 = (0..1023).map(|i| 20 + (i % 10)).sum();
-    let expected_avg = expected_sum / 1023;
-    assert_eq!(decoded[0].value, expected_avg);
+    // Keep-last: last value is 20 + (1022 % 10) = 20 + 2 = 22
+    assert_eq!(decoded[0].value, 22);
 }
 
 #[test]
-fn test_1024_readings_same_interval() {
-    // 1024 readings exceeds pending_count max of 1023 - 1024th should return error
+fn test_many_readings_same_interval() {
+    // With keep-last semantics, no limit on same-interval readings
     let base_ts = 1761955455u64;
     let mut enc = Encoder::<i32, 2000>::new(); // 2000 second interval
 
-    // 1023 readings in same interval (max allowed)
-    for i in 0..1023 {
-        enc.append(base_ts + i, 20).unwrap();
+    // Many readings in same interval - all should succeed with keep-last
+    for i in 0..2000 {
+        enc.append(base_ts + i, 20 + (i as i32 % 10)).unwrap();
     }
-    // This 1024th reading should return IntervalOverflow error
-    assert!(matches!(
-        enc.append(base_ts + 1023, 100),
-        Err(AppendError::IntervalOverflow { count: 1023 })
-    ));
 
-    // Move to next interval - should work since previous was rejected
+    // Move to next interval
     enc.append(base_ts + 2000, 25).unwrap();
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
-    // Average should be 20, the rejected 100 was not included
-    assert_eq!(decoded[0].value, 20);
+    // Keep-last: last value is 20 + (1999 % 10) = 20 + 9 = 29
+    assert_eq!(decoded[0].value, 29);
 }
 
 #[test]
@@ -1539,8 +1524,8 @@ fn test_high_count_with_negative_temps() {
 }
 
 #[test]
-fn test_high_count_mixed_temps() {
-    // Test averaging with mix of positive and negative temps
+fn test_high_count_mixed_temps_keep_last() {
+    // Test keep-last with mix of positive and negative temps
     let base_ts = 1761955455u64;
     let mut enc = Encoder::<i32>::new();
 
@@ -1554,26 +1539,26 @@ fn test_high_count_mixed_temps() {
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
-    // Average of 200 x -100 + 200 x 100 = 0
-    assert_eq!(decoded[0].value, 0);
+    // Keep-last: i=399 is odd, so temp=100
+    assert_eq!(decoded[0].value, 100);
 }
 
 #[test]
-fn test_averaging_to_zero() {
-    // positive + negative temps that average to 0
+fn test_keep_last_various_values() {
+    // Test keep-last with different values in same interval
     let base_ts = 1761955455u64;
     let mut enc = Encoder::<i32>::new();
 
-    // -10 and +10 average to 0
+    // -10 then +10 - keep last = 10
     enc.append(base_ts, -10).unwrap();
     enc.append(base_ts + 1, 10).unwrap();
     enc.append(base_ts + 300, 25).unwrap();
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].value, 0);
+    assert_eq!(decoded[0].value, 10); // keep-last
 
-    // -50, -30, +40, +40 = sum 0, avg 0
+    // -50, -30, +40, +40 - keep last = 40
     let mut enc = Encoder::<i32>::new();
     enc.append(base_ts, -50).unwrap();
     enc.append(base_ts + 1, -30).unwrap();
@@ -1583,7 +1568,7 @@ fn test_averaging_to_zero() {
 
     let decoded = enc.decode();
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].value, 0);
+    assert_eq!(decoded[0].value, 40); // keep-last
 }
 
 #[test]
