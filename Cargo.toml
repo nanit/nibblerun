@@ -10,6 +10,8 @@ rand = "0.9"
 cap = "0.1.2"
 ahash = "0.8.12"
 tsz = "0.1.4"
+tikv-jemallocator = { version = "0.6.1", features = ["stats"] }
+tikv-jemalloc-ctl = { version = "0.6.1", features = ["stats"] }
 
 [dev-dependencies]
 proptest = "1.0"
@@ -30,6 +32,10 @@ path = "src/bin/nbl_analyze.rs"
 [[bin]]
 name = "tsz-bench"
 path = "src/bin/tsz_bench.rs"
+
+[[bin]]
+name = "nbl-bench"
+path = "src/bin/nbl_bench.rs"
 
 [[bench]]
 name = "benchmarks"
