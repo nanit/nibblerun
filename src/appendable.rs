@@ -27,6 +27,19 @@ pub const fn header_size_for_value_bytes(value_bytes: usize) -> usize {
     4 + 2 + 2 + value_bytes + value_bytes + value_bytes + 1 + 1 + 1
 }
 
+/// Frozen header size for i8 values
+pub const FROZEN_HEADER_SIZE: usize = frozen_header_size_for_value_bytes(1);
+
+/// Compute frozen header size based on value byte size.
+/// Frozen format is read-only (no append state needed).
+/// Frozen header layout:
+///   base_ts_offset: 4 bytes
+///   count: 2 bytes
+///   first_value: V::BYTES
+pub const fn frozen_header_size_for_value_bytes(value_bytes: usize) -> usize {
+    4 + 2 + value_bytes
+}
+
 // Header field offsets (fixed portion)
 const OFF_BASE_TS_OFFSET: usize = 0;
 const OFF_COUNT: usize = 4;
@@ -606,6 +619,270 @@ fn encode_delta_value(delta: i32) -> (u32, u32) {
     (bits, 19)
 }
 
+/// Freeze an appendable buffer into a compact read-only format.
+///
+/// The frozen format removes append state (prev_logical_idx, prev_value,
+/// current_value, zero_run, bit_count, bit_accum) and flushes any pending
+/// bits to produce a smaller, finalized buffer.
+///
+/// Frozen header layout:
+///   base_ts_offset: 4 bytes
+///   count: 2 bytes
+///   first_value: V::BYTES
+///   (followed by finalized bit data)
+///
+/// # Arguments
+/// * `buf` - Appendable buffer to freeze
+///
+/// # Returns
+/// New frozen buffer, or empty Vec if input is invalid.
+#[must_use]
+pub fn freeze<V: Value, const INTERVAL: u16>(buf: &[u8]) -> Vec<u8> {
+    let header_size = header_size_for_value_bytes(V::BYTES);
+    if buf.len() < header_size {
+        return Vec::new();
+    }
+
+    // Read appendable header
+    let base_ts_offset = read_u32_le(buf, OFF_BASE_TS_OFFSET);
+    let count = read_u16_le(buf, OFF_COUNT);
+    let first_value = V::read_le(&buf[OFF_FIRST_VALUE..]).to_i32();
+    let prev_value = V::read_le(&buf[off_prev_value(V::BYTES)..]).to_i32();
+    let current_value = V::read_le(&buf[off_current_value(V::BYTES)..]).to_i32();
+    let zero_run = buf[off_zero_run(V::BYTES)];
+    let bit_count = buf[off_bit_count(V::BYTES)];
+    let bit_accum = u32::from(buf[off_bit_accum(V::BYTES)]);
+
+    if count == 0 {
+        return Vec::new();
+    }
+
+    // For single reading, just store the header
+    let frozen_header_size = frozen_header_size_for_value_bytes(V::BYTES);
+    if count == 1 {
+        let mut frozen = vec![0u8; frozen_header_size];
+        write_u32_le(&mut frozen, 0, base_ts_offset);
+        write_u16_le(&mut frozen, 4, count);
+        // For single interval, use current_value (which has keep-last applied)
+        V::from_i32(current_value).write_le(&mut frozen[6..]);
+        return frozen;
+    }
+
+    // Multiple readings - need to finalize bit data
+    let data = &buf[header_size..];
+    let mut final_data = data.to_vec();
+    let mut accum = bit_accum;
+    let mut bits = u32::from(bit_count) & 7;
+    let mut run_zeros = u32::from(zero_run);
+
+    // Helper to flush complete bytes from accumulator
+    let flush_bytes = |accum: &mut u32, bits: &mut u32, out: &mut Vec<u8>| {
+        while *bits >= 8 {
+            *bits -= 8;
+            out.push((*accum >> *bits) as u8);
+        }
+    };
+
+    // Encode the final interval's delta (current_value - prev_value)
+    let delta = current_value.wrapping_sub(prev_value);
+    if delta == 0 {
+        run_zeros = run_zeros.saturating_add(1);
+    } else {
+        // First flush pending zeros
+        let max_iterations = 1000u32;
+        let mut iterations = 0u32;
+        while run_zeros > 0 && iterations < max_iterations {
+            let (b, n, c) = encode_zero_run(run_zeros);
+            accum = (accum << n) | b;
+            bits = bits.saturating_add(n);
+            run_zeros = run_zeros.saturating_sub(c);
+            flush_bytes(&mut accum, &mut bits, &mut final_data);
+            iterations += 1;
+        }
+        // Encode the delta
+        let (delta_bits, delta_num_bits) = encode_delta_value(delta);
+        accum = (accum << delta_num_bits) | delta_bits;
+        bits = bits.saturating_add(delta_num_bits);
+        flush_bytes(&mut accum, &mut bits, &mut final_data);
+    }
+
+    // Flush remaining zeros
+    let max_iterations = 1000u32;
+    let mut iterations = 0u32;
+    while run_zeros > 0 && iterations < max_iterations {
+        let (b, n, c) = encode_zero_run(run_zeros);
+        accum = (accum << n) | b;
+        bits = bits.saturating_add(n);
+        run_zeros = run_zeros.saturating_sub(c);
+        flush_bytes(&mut accum, &mut bits, &mut final_data);
+        iterations += 1;
+    }
+
+    // Flush any remaining complete bytes
+    flush_bytes(&mut accum, &mut bits, &mut final_data);
+
+    // Pad remaining bits
+    if bits > 0 {
+        final_data.push((accum << (8 - bits)) as u8);
+    }
+
+    // Build frozen buffer
+    let mut frozen = vec![0u8; frozen_header_size];
+    write_u32_le(&mut frozen, 0, base_ts_offset);
+    write_u16_le(&mut frozen, 4, count);
+    V::from_i32(first_value).write_le(&mut frozen[6..]);
+    frozen.extend_from_slice(&final_data);
+
+    frozen
+}
+
+/// Decode a frozen buffer to readings.
+///
+/// The frozen format has a minimal header (no append state) and finalized bit data.
+///
+/// # Arguments
+/// * `buf` - Frozen buffer to decode
+///
+/// # Returns
+/// Vector of decoded readings. Returns empty vector if buffer is invalid.
+#[must_use]
+pub fn decode_frozen<V: Value, const INTERVAL: u16>(buf: &[u8]) -> Vec<Reading<V>> {
+    let frozen_header_size = frozen_header_size_for_value_bytes(V::BYTES);
+    if buf.len() < frozen_header_size {
+        return Vec::new();
+    }
+
+    // Read frozen header
+    let base_ts_offset = read_u32_le(buf, OFF_BASE_TS_OFFSET);
+    let base_ts = EPOCH_BASE.wrapping_add(u64::from(base_ts_offset));
+    let count = read_u16_le(buf, OFF_COUNT) as usize;
+    // In frozen format, first_value is at offset 6 (after base_ts_offset + count)
+    let first_value = V::read_le(&buf[6..]).to_i32();
+
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let first_val = V::from_i32(first_value);
+    let mut decoded = Vec::with_capacity(count);
+    decoded.push(Reading {
+        ts: base_ts,
+        value: first_val,
+    });
+
+    if count == 1 {
+        return decoded;
+    }
+
+    // Decode bit data
+    let data = &buf[frozen_header_size..];
+    let mut reader = BitReader::new(data);
+    let mut prev_val = first_value;
+    let mut idx = 1u64;
+    let interval = u64::from(INTERVAL);
+
+    while decoded.len() < count && reader.has_more() {
+        if reader.read_bits(1) == 0 {
+            // 0 = zero delta
+            decoded.push(Reading {
+                ts: base_ts.wrapping_add(idx.wrapping_mul(interval)),
+                value: V::from_i32(prev_val),
+            });
+            idx += 1;
+            continue;
+        }
+        if reader.read_bits(1) == 0 {
+            // 10x = ±1 delta
+            prev_val = prev_val.wrapping_add(if reader.read_bits(1) == 0 { 1 } else { -1 });
+            decoded.push(Reading {
+                ts: base_ts.wrapping_add(idx.wrapping_mul(interval)),
+                value: V::from_i32(prev_val),
+            });
+            idx += 1;
+            continue;
+        }
+        // 11...
+        if reader.read_bits(1) == 0 {
+            // 110 = single-interval gap
+            idx += 1;
+            continue;
+        }
+        // 111...
+        if reader.read_bits(1) == 0 {
+            // 1110x = ±2 delta
+            prev_val = prev_val.wrapping_add(if reader.read_bits(1) == 0 { 2 } else { -2 });
+            decoded.push(Reading {
+                ts: base_ts.wrapping_add(idx.wrapping_mul(interval)),
+                value: V::from_i32(prev_val),
+            });
+            idx += 1;
+            continue;
+        }
+        // 1111...
+        if reader.read_bits(1) == 0 {
+            // 11110xxxx = zero run 8-21
+            for _ in 0..reader.read_bits(4) + 8 {
+                if decoded.len() >= count {
+                    break;
+                }
+                decoded.push(Reading {
+                    ts: base_ts.wrapping_add(idx.wrapping_mul(interval)),
+                    value: V::from_i32(prev_val),
+                });
+                idx += 1;
+            }
+            continue;
+        }
+        // 11111...
+        if reader.read_bits(1) == 0 {
+            // 111110xxxxxxx = zero run 22-149
+            for _ in 0..reader.read_bits(7) + 22 {
+                if decoded.len() >= count {
+                    break;
+                }
+                decoded.push(Reading {
+                    ts: base_ts.wrapping_add(idx.wrapping_mul(interval)),
+                    value: V::from_i32(prev_val),
+                });
+                idx += 1;
+            }
+            continue;
+        }
+        // 111111...
+        if reader.read_bits(1) == 0 {
+            // 1111110xxxx = ±3-10 delta
+            let e = reader.read_bits(4) as i32;
+            prev_val = prev_val.wrapping_add(if e < 8 { e - 10 } else { e - 5 });
+            decoded.push(Reading {
+                ts: base_ts.wrapping_add(idx.wrapping_mul(interval)),
+                value: V::from_i32(prev_val),
+            });
+            idx += 1;
+            continue;
+        }
+        // 1111111...
+        if reader.read_bits(1) == 0 {
+            // 11111110xxxxxxxxxxx = large delta
+            let raw = reader.read_bits(11);
+            prev_val = prev_val.wrapping_add(if raw & 0x400 != 0 {
+                (raw | 0xFFFF_F800) as i32
+            } else {
+                raw as i32
+            });
+            decoded.push(Reading {
+                ts: base_ts.wrapping_add(idx.wrapping_mul(interval)),
+                value: V::from_i32(prev_val),
+            });
+            idx += 1;
+        } else {
+            // 11111111xxxxxx = gap 2-65 intervals
+            idx = idx.wrapping_add(u64::from(reader.read_bits(6) + 2));
+        }
+    }
+
+    decoded
+}
+
 /// Get the count of readings in the buffer.
 #[must_use]
 pub fn count(buf: &[u8]) -> Option<u16> {
@@ -1167,5 +1444,196 @@ mod tests {
             assert_eq!(readings[i].ts, base + i as u64 * 300);
             assert_eq!(readings[i].value, 20 + ((i % 5) as i32));
         }
+    }
+
+    // ========================================================================
+    // freeze() and decode_frozen() tests
+    // ========================================================================
+
+    #[test]
+    fn test_freeze_single_reading() {
+        let buf = create::<i8, 300>(1_761_000_000, 22);
+        let frozen = freeze::<i8, 300>(&buf);
+
+        // Frozen header: 4 (base_ts_offset) + 2 (count) + 1 (first_value) = 7 bytes
+        assert_eq!(frozen.len(), frozen_header_size_for_value_bytes(1));
+
+        let readings = decode_frozen::<i8, 300>(&frozen);
+        assert_eq!(readings.len(), 1);
+        assert_eq!(readings[0].ts, 1_761_000_000);
+        assert_eq!(readings[0].value, 22);
+    }
+
+    #[test]
+    fn test_freeze_decode_frozen_roundtrip() {
+        let base = 1_761_000_000u64;
+        let mut buf = create::<i8, 300>(base, 20);
+
+        // Add several readings with various deltas
+        append::<i8, 300>(&mut buf, base + 300, 20).unwrap(); // zero delta
+        append::<i8, 300>(&mut buf, base + 600, 21).unwrap(); // +1
+        append::<i8, 300>(&mut buf, base + 900, 20).unwrap(); // -1
+        append::<i8, 300>(&mut buf, base + 1200, 22).unwrap(); // +2
+        append::<i8, 300>(&mut buf, base + 1500, 20).unwrap(); // -2
+
+        let frozen = freeze::<i8, 300>(&buf);
+        let frozen_readings = decode_frozen::<i8, 300>(&frozen);
+        let appendable_readings = decode::<i8, 300>(&buf);
+
+        // Frozen should decode to same values as appendable
+        assert_eq!(frozen_readings.len(), appendable_readings.len());
+        for (f, a) in frozen_readings.iter().zip(appendable_readings.iter()) {
+            assert_eq!(f.ts, a.ts);
+            assert_eq!(f.value, a.value);
+        }
+    }
+
+    #[test]
+    fn test_freeze_with_zero_runs() {
+        let base = 1_761_000_000u64;
+        let mut buf = create::<i8, 300>(base, 25);
+
+        // Create a long zero run
+        for i in 1..50 {
+            append::<i8, 300>(&mut buf, base + i * 300, 25).unwrap();
+        }
+
+        let frozen = freeze::<i8, 300>(&buf);
+        let frozen_readings = decode_frozen::<i8, 300>(&frozen);
+
+        assert_eq!(frozen_readings.len(), 50);
+        for reading in &frozen_readings {
+            assert_eq!(reading.value, 25);
+        }
+    }
+
+    #[test]
+    fn test_freeze_with_gaps() {
+        let base = 1_761_000_000u64;
+        let mut buf = create::<i8, 300>(base, 20);
+
+        // Skip some intervals (creates gaps)
+        append::<i8, 300>(&mut buf, base + 300 * 5, 21).unwrap(); // gap of 4 intervals
+        append::<i8, 300>(&mut buf, base + 300 * 10, 22).unwrap(); // gap of 4 intervals
+
+        let frozen = freeze::<i8, 300>(&buf);
+        let frozen_readings = decode_frozen::<i8, 300>(&frozen);
+        let appendable_readings = decode::<i8, 300>(&buf);
+
+        assert_eq!(frozen_readings.len(), appendable_readings.len());
+        for (f, a) in frozen_readings.iter().zip(appendable_readings.iter()) {
+            assert_eq!(f.ts, a.ts);
+            assert_eq!(f.value, a.value);
+        }
+    }
+
+    #[test]
+    fn test_freeze_keep_last_semantics() {
+        let base = 1_761_000_000u64;
+        let mut buf = create::<i8, 300>(base, 10);
+
+        // Multiple values in same interval - should keep last
+        append::<i8, 300>(&mut buf, base + 50, 11).unwrap();
+        append::<i8, 300>(&mut buf, base + 100, 12).unwrap();
+        append::<i8, 300>(&mut buf, base + 150, 15).unwrap(); // last in interval
+
+        let frozen = freeze::<i8, 300>(&buf);
+        let readings = decode_frozen::<i8, 300>(&frozen);
+
+        assert_eq!(readings.len(), 1);
+        assert_eq!(readings[0].value, 15); // keep last
+    }
+
+    #[test]
+    fn test_freeze_is_smaller_than_appendable() {
+        let base = 1_761_000_000u64;
+        let mut buf = create::<i8, 300>(base, 20);
+
+        for i in 1..100 {
+            append::<i8, 300>(&mut buf, base + i * 300, 20 + ((i % 3) as i8)).unwrap();
+        }
+
+        let frozen = freeze::<i8, 300>(&buf);
+
+        // Frozen should be smaller (no append state overhead)
+        // Appendable header: 14 bytes, Frozen header: 7 bytes
+        assert!(frozen.len() < buf.len());
+    }
+
+    #[test]
+    fn test_freeze_i32_values() {
+        let base = 1_761_000_000u64;
+        let mut buf = create::<i32, 300>(base, 1000);
+
+        append::<i32, 300>(&mut buf, base + 300, 1001).unwrap();
+        append::<i32, 300>(&mut buf, base + 600, 999).unwrap();
+        append::<i32, 300>(&mut buf, base + 900, 1005).unwrap();
+
+        let frozen = freeze::<i32, 300>(&buf);
+        let frozen_readings = decode_frozen::<i32, 300>(&frozen);
+        let appendable_readings = decode::<i32, 300>(&buf);
+
+        assert_eq!(frozen_readings.len(), appendable_readings.len());
+        for (f, a) in frozen_readings.iter().zip(appendable_readings.iter()) {
+            assert_eq!(f.ts, a.ts);
+            assert_eq!(f.value, a.value);
+        }
+    }
+
+    #[test]
+    fn test_freeze_empty_buffer_returns_empty() {
+        let frozen = freeze::<i8, 300>(&[]);
+        assert!(frozen.is_empty());
+
+        let readings = decode_frozen::<i8, 300>(&frozen);
+        assert!(readings.is_empty());
+    }
+
+    #[test]
+    fn test_decode_frozen_invalid_buffer_returns_empty() {
+        // Too short
+        let readings = decode_frozen::<i8, 300>(&[1, 2, 3]);
+        assert!(readings.is_empty());
+    }
+
+    #[test]
+    fn test_freeze_large_deltas() {
+        let base = 1_761_000_000u64;
+        let mut buf = create::<i32, 300>(base, 0);
+
+        // Use deltas in the large delta range (±11 to ±1023)
+        append::<i32, 300>(&mut buf, base + 300, 100).unwrap(); // +100
+        append::<i32, 300>(&mut buf, base + 600, -50).unwrap(); // -150
+        append::<i32, 300>(&mut buf, base + 900, 500).unwrap(); // +550
+
+        let frozen = freeze::<i32, 300>(&buf);
+        let frozen_readings = decode_frozen::<i32, 300>(&frozen);
+        let appendable_readings = decode::<i32, 300>(&buf);
+
+        assert_eq!(frozen_readings.len(), 4);
+        for (f, a) in frozen_readings.iter().zip(appendable_readings.iter()) {
+            assert_eq!(f.ts, a.ts);
+            assert_eq!(f.value, a.value);
+        }
+    }
+
+    #[test]
+    fn test_freeze_medium_deltas() {
+        let base = 1_761_000_000u64;
+        let mut buf = create::<i8, 300>(base, 20);
+
+        // Use deltas in the ±3-10 range
+        append::<i8, 300>(&mut buf, base + 300, 25).unwrap(); // +5
+        append::<i8, 300>(&mut buf, base + 600, 18).unwrap(); // -7
+        append::<i8, 300>(&mut buf, base + 900, 28).unwrap(); // +10
+
+        let frozen = freeze::<i8, 300>(&buf);
+        let frozen_readings = decode_frozen::<i8, 300>(&frozen);
+
+        assert_eq!(frozen_readings.len(), 4);
+        assert_eq!(frozen_readings[0].value, 20);
+        assert_eq!(frozen_readings[1].value, 25);
+        assert_eq!(frozen_readings[2].value, 18);
+        assert_eq!(frozen_readings[3].value, 28);
     }
 }

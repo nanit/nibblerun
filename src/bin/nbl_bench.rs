@@ -22,6 +22,7 @@ enum BenchmarkType {
     NibblerunAhash,
     NibblerunFxhash,
     NibblerunBtreemap,
+    NibblerunFrozen,
 }
 
 #[derive(Parser)]
@@ -266,6 +267,41 @@ fn run_nibblerun_btreemap(readings: &[(u32, u32, i8)]) -> (BTreeMap<u32, Vec<u8>
     (storage, total_data)
 }
 
+/// NibbleRun frozen storage: AHashMap<u32, Vec<u8>>
+/// Encodes then freezes for compact read-only storage.
+/// Returns the storage and frozen data size
+fn run_nibblerun_frozen(readings: &[(u32, u32, i8)]) -> (AHashMap<u32, Vec<u8>>, usize) {
+    // First encode to appendable format
+    let mut temp_storage: AHashMap<u32, Vec<u8>> = AHashMap::new();
+    for &(device_id, ts, val) in readings {
+        if let Some(buf) = temp_storage.get_mut(&device_id) {
+            let _ = nibblerun::appendable::append::<i8, 300>(buf, ts as u64, val);
+        } else {
+            let buf = nibblerun::appendable::create::<i8, 300>(ts as u64, val);
+            temp_storage.insert(device_id, buf);
+        }
+    }
+
+    // Then freeze all buffers
+    let mut storage: AHashMap<u32, Vec<u8>> = AHashMap::new();
+    for (device_id, buf) in temp_storage {
+        let frozen = nibblerun::appendable::freeze::<i8, 300>(&buf);
+        storage.insert(device_id, frozen);
+    }
+
+    // Calculate actual frozen data size
+    let total_data: usize = storage.values().map(|v| v.len()).sum();
+    let total_capacity: usize = storage.values().map(|v| v.capacity()).sum();
+    let avg_data = total_data / storage.len();
+    let avg_capacity = total_capacity / storage.len();
+
+    println!("  Stored {} devices (AHashMap capacity: {})", storage.len(), storage.capacity());
+    println!("  Frozen data: {:.1} MB total, {} bytes avg per device", total_data as f64 / (1024.0 * 1024.0), avg_data);
+    println!("  Vec capacity: {:.1} MB total, {} bytes avg per device", total_capacity as f64 / (1024.0 * 1024.0), avg_capacity);
+
+    (storage, total_data)
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -345,6 +381,16 @@ fn main() {
             let after = get_allocated();
             let allocated = after.saturating_sub(before);
             print_results("nibblerun-btreemap", expected_bytes, allocated, Some(data_size), interleaved.len(), encode_duration);
+            black_box(storage);
+            return;
+        }
+        BenchmarkType::NibblerunFrozen => {
+            println!("Running nibblerun-frozen benchmark...");
+            let (storage, data_size) = run_nibblerun_frozen(&interleaved);
+            let encode_duration = start.elapsed();
+            let after = get_allocated();
+            let allocated = after.saturating_sub(before);
+            print_results("nibblerun-frozen", expected_bytes, allocated, Some(data_size), interleaved.len(), encode_duration);
             black_box(storage);
             return;
         }

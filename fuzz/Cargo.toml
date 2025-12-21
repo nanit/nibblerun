@@ -68,3 +68,17 @@ path = "fuzz_targets/fuzz_lossless.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_frozen_roundtrip"
+path = "fuzz_targets/fuzz_frozen_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_decode_frozen"
+path = "fuzz_targets/fuzz_decode_frozen.rs"
+test = false
+doc = false
+bench = false
