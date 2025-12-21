@@ -30,10 +30,6 @@ name = "nbl-analyze"
 path = "src/bin/nbl_analyze.rs"
 
 [[bin]]
-name = "tsz-bench"
-path = "src/bin/tsz_bench.rs"
-
-[[bin]]
 name = "nbl-bench"
 path = "src/bin/nbl_bench.rs"
 

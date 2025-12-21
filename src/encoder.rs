@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
-use crate::appendable::{self, HEADER_SIZE};
+use crate::appendable::{self, header_size_for_value_bytes};
 use crate::error::AppendError;
 use crate::reading::Reading;
 use crate::value::Value;
@@ -133,7 +133,8 @@ impl<V: Value, const INTERVAL: u16> Encoder<V, INTERVAL> {
         if bytes.is_empty() {
             return Ok(Self::new());
         }
-        if bytes.len() < HEADER_SIZE {
+        let header_size = header_size_for_value_bytes(V::BYTES);
+        if bytes.len() < header_size {
             return Err(AppendError::CountOverflow); // TODO: better error
         }
         Ok(Self {

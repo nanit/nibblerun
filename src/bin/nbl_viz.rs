@@ -19,16 +19,16 @@ const DEFAULT_INTERVAL: u16 = 300;
 
 // Layout constants
 #[allow(dead_code)]
-const LEFT_WIDTH: usize = 280;
-const RIGHT_X: usize = 340;
+const LEFT_WIDTH: usize = 320;
+const RIGHT_X: usize = 380;
 const ROW_HEIGHT: usize = 24;
 const BIT_SIZE: usize = 14;
 const BIT_GAP: usize = 2;
 const MARGIN: usize = 20;
 const LEGEND_WIDTH: usize = 280;
-const LEGEND_X: usize = 860;
+const LEGEND_X: usize = 900;
 // Ground truth column (when CSV input)
-const GT_X: usize = 660;
+const GT_X: usize = 700;
 const GT_WIDTH: usize = 300;
 
 // Bitstream view constants
@@ -494,7 +494,7 @@ fn render_svg(
     interval: u16,
 ) -> String {
     let num_rows = rows.len();
-    let legend_height = 460;
+    let legend_height = 500;  // Increased for 8 header fields instead of 6
     let stats_height = if compression_stats.is_some() { 60 } else { 0 };
     let content_height = MARGIN * 2 + num_rows * ROW_HEIGHT + 40 + stats_height;
 
@@ -757,7 +757,7 @@ fn render_legend(legend_x: usize) -> String {
     let line_color = "#ddd";
 
     legend.push_str(&format!(
-        r#"  <rect x="{}" y="{}" width="{}" height="440" fill="{}" class="legend-box" rx="4"/>
+        r#"  <rect x="{}" y="{}" width="{}" height="480" fill="{}" class="legend-box" rx="4"/>
 "#,
         x - 10, y - 5, LEGEND_WIDTH, bg_color
     ));
@@ -772,7 +772,7 @@ fn render_legend(legend_x: usize) -> String {
     legend.push_str(&format!(
         r#"  <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="1"/>
 "#,
-        x - 10, MARGIN, x - 10, MARGIN + 440, line_color
+        x - 10, MARGIN, x - 10, MARGIN + 480, line_color
     ));
 
     // Header section
@@ -782,13 +782,19 @@ fn render_legend(legend_x: usize) -> String {
     ));
     y += 16;
 
+    // Header layout for i8 value type (20 bytes):
+    // [0-3] base_ts_offset, [4-5] count, [6-7] prev_logical_idx,
+    // [8] first_value, [9] prev_value, [10-17] pending_avg,
+    // [18] bit_count, [19] bit_accum
     let header_fields = [
-        ("version", "1 byte", colors::HEADER),
-        ("value_type", "1 byte", colors::HEADER),
-        ("interval", "2 bytes", colors::HEADER),
         ("base_ts_offset", "4 bytes", colors::HEADER),
         ("count", "2 bytes", colors::HEADER),
-        ("first_value", "4 bytes", colors::HEADER),
+        ("prev_logical_idx", "2 bytes", colors::HEADER),
+        ("first_value", "1 byte", colors::HEADER),
+        ("prev_value", "1 byte", colors::HEADER),
+        ("pending_avg", "8 bytes", colors::HEADER),
+        ("bit_count", "1 byte", colors::HEADER),
+        ("bit_accum", "1 byte", colors::HEADER),
     ];
 
     for (name, size, color) in header_fields {

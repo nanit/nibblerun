@@ -12,18 +12,49 @@ use crate::error::AppendError;
 use crate::reading::Reading;
 use crate::value::Value;
 
-/// Fixed header size in bytes (same for all value types)
-pub const HEADER_SIZE: usize = 26;
+/// Header size for i8 values (used as default for HEADER_SIZE constant)
+pub const HEADER_SIZE: usize = header_size_for_value_bytes(1);
 
-// Header field offsets
+/// Compute header size based on value byte size
+/// Header layout:
+///   base_ts_offset: 4 bytes
+///   count: 2 bytes
+///   prev_logical_idx: 2 bytes
+///   first_value: V::BYTES
+///   prev_value: V::BYTES
+///   pending_avg: 8 bytes
+///   bit_count: 1 byte
+///   bit_accum: 1 byte
+pub const fn header_size_for_value_bytes(value_bytes: usize) -> usize {
+    4 + 2 + 2 + value_bytes + value_bytes + 8 + 1 + 1
+}
+
+// Header field offsets (fixed portion)
 const OFF_BASE_TS_OFFSET: usize = 0;
 const OFF_COUNT: usize = 4;
 const OFF_PREV_LOGICAL_IDX: usize = 6;
 const OFF_FIRST_VALUE: usize = 8;
-const OFF_PREV_VALUE: usize = 12;
-const OFF_PENDING_AVG: usize = 16;
-const OFF_BIT_COUNT: usize = 24;
-const OFF_BIT_ACCUM: usize = 25;
+
+// Variable offsets depend on V::BYTES
+#[inline]
+const fn off_prev_value(value_bytes: usize) -> usize {
+    8 + value_bytes
+}
+
+#[inline]
+const fn off_pending_avg(value_bytes: usize) -> usize {
+    8 + 2 * value_bytes
+}
+
+#[inline]
+const fn off_bit_count(value_bytes: usize) -> usize {
+    8 + 2 * value_bytes + 8
+}
+
+#[inline]
+const fn off_bit_accum(value_bytes: usize) -> usize {
+    8 + 2 * value_bytes + 8 + 1
+}
 
 /// Zero run is packed into bits 42-57 of `pending_avg` (16 bits)
 const ZERO_RUN_SHIFT: u32 = 42;
@@ -113,10 +144,6 @@ fn read_u64_le(buf: &[u8], offset: usize) -> u64 {
     ])
 }
 
-#[inline]
-fn read_i32_le(buf: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
-}
 
 #[inline]
 fn write_u16_le(buf: &mut [u8], offset: usize, value: u16) {
@@ -142,14 +169,6 @@ fn write_u64_le(buf: &mut [u8], offset: usize, value: u64) {
     }
 }
 
-#[inline]
-fn write_i32_le(buf: &mut [u8], offset: usize, value: i32) {
-    let bytes = value.to_le_bytes();
-    buf[offset] = bytes[0];
-    buf[offset + 1] = bytes[1];
-    buf[offset + 2] = bytes[2];
-    buf[offset + 3] = bytes[3];
-}
 
 // ============================================================================
 // Zero run helpers
@@ -249,7 +268,8 @@ fn write_gaps(buf: &mut Vec<u8>, bit_accum: &mut u32, bit_count: &mut u8, mut co
 /// A new `Vec<u8>` containing the initialized buffer with header and no data yet.
 #[must_use]
 pub fn create<V: Value, const INTERVAL: u16>(ts: u64, value: V) -> Vec<u8> {
-    let mut buf = vec![0u8; HEADER_SIZE];
+    let header_size = header_size_for_value_bytes(V::BYTES);
+    let mut buf = vec![0u8; header_size];
 
     // Write header
     let base_ts_offset = ts.wrapping_sub(EPOCH_BASE) as u32;
@@ -258,14 +278,14 @@ pub fn create<V: Value, const INTERVAL: u16>(ts: u64, value: V) -> Vec<u8> {
     write_u16_le(&mut buf, OFF_PREV_LOGICAL_IDX, 0);
 
     let val_i32 = value.to_i32();
-    write_i32_le(&mut buf, OFF_FIRST_VALUE, val_i32);
-    write_i32_le(&mut buf, OFF_PREV_VALUE, val_i32);
+    V::from_i32(val_i32).write_le(&mut buf[OFF_FIRST_VALUE..]);
+    V::from_i32(val_i32).write_le(&mut buf[off_prev_value(V::BYTES)..]);
 
     // pending_avg: count=1, sum=value (zero_run is 0)
     let pending = pack_avg(1, val_i32);
-    write_u64_le(&mut buf, OFF_PENDING_AVG, pending);
-    buf[OFF_BIT_COUNT] = 0;
-    buf[OFF_BIT_ACCUM] = 0;
+    write_u64_le(&mut buf, off_pending_avg(V::BYTES), pending);
+    buf[off_bit_count(V::BYTES)] = 0;
+    buf[off_bit_accum(V::BYTES)] = 0;
 
     buf
 }
@@ -291,7 +311,8 @@ pub fn append<V: Value, const INTERVAL: u16>(
     ts: u64,
     value: V,
 ) -> Result<(), AppendError> {
-    if buf.len() < HEADER_SIZE {
+    let header_size = header_size_for_value_bytes(V::BYTES);
+    if buf.len() < header_size {
         return Err(AppendError::CountOverflow); // TODO: better error
     }
 
@@ -302,10 +323,10 @@ pub fn append<V: Value, const INTERVAL: u16>(
     let base_ts = EPOCH_BASE + u64::from(base_ts_offset);
     let count = read_u16_le(buf, OFF_COUNT);
     let prev_logical_idx = read_u16_le(buf, OFF_PREV_LOGICAL_IDX);
-    let prev_value = read_i32_le(buf, OFF_PREV_VALUE);
-    let mut pending_avg = read_u64_le(buf, OFF_PENDING_AVG);
-    let mut bit_accum = u32::from(buf[OFF_BIT_ACCUM]);
-    let mut bit_count = buf[OFF_BIT_COUNT];
+    let prev_value = V::read_le(&buf[off_prev_value(V::BYTES)..]).to_i32();
+    let mut pending_avg = read_u64_le(buf, off_pending_avg(V::BYTES));
+    let mut bit_accum = u32::from(buf[off_bit_accum(V::BYTES)]);
+    let mut bit_count = buf[off_bit_count(V::BYTES)];
 
     // Reject out-of-order readings (ts before base_ts)
     if ts < base_ts {
@@ -343,7 +364,7 @@ pub fn append<V: Value, const INTERVAL: u16>(
         // Preserve zero_run bits when updating pending_avg
         pending_avg =
             (pending_avg & ZERO_RUN_MASK) | pack_avg(pcount + 1, psum.saturating_add(value_i32));
-        write_u64_le(buf, OFF_PENDING_AVG, pending_avg);
+        write_u64_le(buf, off_pending_avg(V::BYTES), pending_avg);
         return Ok(());
     }
 
@@ -369,7 +390,7 @@ pub fn append<V: Value, const INTERVAL: u16>(
     }
 
     // All checks passed - finalize previous interval
-    let new_prev_value = finalize_pending_interval(
+    let new_prev_value = finalize_pending_interval::<V>(
         buf,
         &mut bit_accum,
         &mut bit_count,
@@ -390,13 +411,13 @@ pub fn append<V: Value, const INTERVAL: u16>(
     // Update header for new interval
     write_u16_le(buf, OFF_COUNT, count + 1);
     write_u16_le(buf, OFF_PREV_LOGICAL_IDX, logical_idx);
-    write_i32_le(buf, OFF_PREV_VALUE, new_prev_value);
+    V::from_i32(new_prev_value).write_le(&mut buf[off_prev_value(V::BYTES)..]);
 
     // Initialize pending for new interval
     pending_avg = (pending_avg & ZERO_RUN_MASK) | pack_avg(1, value_i32);
-    write_u64_le(buf, OFF_PENDING_AVG, pending_avg);
-    buf[OFF_BIT_COUNT] = bit_count;
-    buf[OFF_BIT_ACCUM] = bit_accum as u8;
+    write_u64_le(buf, off_pending_avg(V::BYTES), pending_avg);
+    buf[off_bit_count(V::BYTES)] = bit_count;
+    buf[off_bit_accum(V::BYTES)] = bit_accum as u8;
 
     Ok(())
 }
@@ -404,7 +425,7 @@ pub fn append<V: Value, const INTERVAL: u16>(
 /// Finalize the pending interval: compute average and encode the delta.
 /// Returns the new prev_value.
 #[inline]
-fn finalize_pending_interval(
+fn finalize_pending_interval<V: Value>(
     buf: &mut Vec<u8>,
     bit_accum: &mut u32,
     bit_count: &mut u8,
@@ -422,7 +443,7 @@ fn finalize_pending_interval(
 
     // For the first interval, just update first_value
     if count == 1 {
-        write_i32_le(buf, OFF_FIRST_VALUE, avg);
+        V::from_i32(avg).write_le(&mut buf[OFF_FIRST_VALUE..]);
     } else {
         // Encode delta from previous interval's average
         let delta = avg - prev_value;
@@ -449,7 +470,8 @@ fn finalize_pending_interval(
 /// Vector of decoded readings. Returns empty vector if buffer is invalid.
 #[must_use]
 pub fn decode<V: Value, const INTERVAL: u16>(buf: &[u8]) -> Vec<Reading<V>> {
-    if buf.len() < HEADER_SIZE {
+    let header_size = header_size_for_value_bytes(V::BYTES);
+    if buf.len() < header_size {
         return Vec::new();
     }
 
@@ -457,11 +479,11 @@ pub fn decode<V: Value, const INTERVAL: u16>(buf: &[u8]) -> Vec<Reading<V>> {
     let base_ts_offset = read_u32_le(buf, OFF_BASE_TS_OFFSET);
     let base_ts = EPOCH_BASE.wrapping_add(u64::from(base_ts_offset));
     let count = read_u16_le(buf, OFF_COUNT) as usize;
-    let first_value = read_i32_le(buf, OFF_FIRST_VALUE);
-    let prev_value = read_i32_le(buf, OFF_PREV_VALUE);
-    let pending_avg = read_u64_le(buf, OFF_PENDING_AVG);
-    let bit_count = buf[OFF_BIT_COUNT];
-    let bit_accum = u32::from(buf[OFF_BIT_ACCUM]);
+    let first_value = V::read_le(&buf[OFF_FIRST_VALUE..]).to_i32();
+    let prev_value = V::read_le(&buf[off_prev_value(V::BYTES)..]).to_i32();
+    let pending_avg = read_u64_le(buf, off_pending_avg(V::BYTES));
+    let bit_count = buf[off_bit_count(V::BYTES)];
+    let bit_accum = u32::from(buf[off_bit_accum(V::BYTES)]);
 
     if count == 0 {
         return Vec::new();
@@ -496,7 +518,7 @@ pub fn decode<V: Value, const INTERVAL: u16>(buf: &[u8]) -> Vec<Reading<V>> {
     }
 
     // Build finalized bit data
-    let data = &buf[HEADER_SIZE..];
+    let data = &buf[header_size..];
     let mut final_data = data.to_vec();
     let mut accum = bit_accum;
     // Sanitize bit_count to valid range [0, 7] since we only store partial bytes
@@ -710,7 +732,9 @@ pub fn is_empty(buf: &[u8]) -> bool {
 pub fn decode_with_spans<V: Value, const INTERVAL: u16>(
     buf: &[u8],
 ) -> (Vec<Reading<V>>, Vec<BitSpan>, Vec<BitSpan>) {
-    if buf.len() < HEADER_SIZE {
+    let header_size = header_size_for_value_bytes(V::BYTES);
+    let value_bits = V::BYTES * 8;
+    if buf.len() < header_size {
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
@@ -752,51 +776,51 @@ pub fn decode_with_spans<V: Value, const INTERVAL: u16>(
     });
     span_id += 1;
 
-    // First value (4 bytes = 32 bits)
-    let first_value = read_i32_le(buf, OFF_FIRST_VALUE);
+    // First value (V::BYTES)
+    let first_value = V::read_le(&buf[OFF_FIRST_VALUE..]).to_i32();
     header_spans.push(BitSpan {
         id: span_id,
         start_bit: OFF_FIRST_VALUE * 8,
-        length: 32,
+        length: value_bits,
         kind: BitSpanKind::HeaderFirstValue(first_value),
     });
     span_id += 1;
 
-    // Previous value (4 bytes = 32 bits)
-    let prev_value = read_i32_le(buf, OFF_PREV_VALUE);
+    // Previous value (V::BYTES)
+    let prev_value = V::read_le(&buf[off_prev_value(V::BYTES)..]).to_i32();
     header_spans.push(BitSpan {
         id: span_id,
-        start_bit: OFF_PREV_VALUE * 8,
-        length: 32,
+        start_bit: off_prev_value(V::BYTES) * 8,
+        length: value_bits,
         kind: BitSpanKind::HeaderPrevValue(prev_value),
     });
     span_id += 1;
 
     // Pending average (8 bytes = 64 bits)
-    let pending_avg = read_u64_le(buf, OFF_PENDING_AVG);
+    let pending_avg = read_u64_le(buf, off_pending_avg(V::BYTES));
     header_spans.push(BitSpan {
         id: span_id,
-        start_bit: OFF_PENDING_AVG * 8,
+        start_bit: off_pending_avg(V::BYTES) * 8,
         length: 64,
         kind: BitSpanKind::HeaderPendingAvg(pending_avg),
     });
     span_id += 1;
 
     // Bit count (1 byte = 8 bits)
-    let bit_count = buf[OFF_BIT_COUNT];
+    let bit_count = buf[off_bit_count(V::BYTES)];
     header_spans.push(BitSpan {
         id: span_id,
-        start_bit: OFF_BIT_COUNT * 8,
+        start_bit: off_bit_count(V::BYTES) * 8,
         length: 8,
         kind: BitSpanKind::HeaderBitCount(bit_count),
     });
     span_id += 1;
 
     // Bit accumulator (1 byte = 8 bits)
-    let bit_accum = u32::from(buf[OFF_BIT_ACCUM]);
+    let bit_accum = u32::from(buf[off_bit_accum(V::BYTES)]);
     header_spans.push(BitSpan {
         id: span_id,
-        start_bit: OFF_BIT_ACCUM * 8,
+        start_bit: off_bit_accum(V::BYTES) * 8,
         length: 8,
         kind: BitSpanKind::HeaderBitAccum(bit_accum as u8),
     });
@@ -835,7 +859,7 @@ pub fn decode_with_spans<V: Value, const INTERVAL: u16>(
     }
 
     // Build finalized bit data (same as decode())
-    let data = &buf[HEADER_SIZE..];
+    let data = &buf[header_size..];
     let mut final_data = data.to_vec();
     let mut accum = bit_accum;
     let mut bits = u32::from(bit_count) & 7;
@@ -891,7 +915,7 @@ pub fn decode_with_spans<V: Value, const INTERVAL: u16>(
     let mut prev_val = first_value;
     let mut idx = 1u64;
     let interval = u64::from(INTERVAL);
-    let header_bits = HEADER_SIZE * 8;
+    let header_bits = header_size * 8;
 
     while decoded.len() < count && reader.has_more() {
         let start_bit = reader.bit_pos();
@@ -1189,7 +1213,7 @@ mod tests {
     #[test]
     fn test_create_and_decode_single() {
         let buf = create::<i32, 300>(1_761_000_000, 22);
-        assert_eq!(buf.len(), HEADER_SIZE);
+        assert_eq!(buf.len(), header_size_for_value_bytes(i32::BYTES));
 
         let readings = decode::<i32, 300>(&buf);
         assert_eq!(readings.len(), 1);

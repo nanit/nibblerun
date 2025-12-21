@@ -1,5 +1,6 @@
-use crate::appendable::HEADER_SIZE;
+use crate::appendable::header_size_for_value_bytes;
 use crate::constants::{div_by_interval, EPOCH_BASE};
+use crate::value::Value;
 use crate::{decode, AppendError, Encoder};
 
 /// ============================================================================
@@ -519,7 +520,7 @@ fn test_reading_before_epoch_base_as_first() {
     // to_bytes() completes but produces incorrect data due to wrapping
     // In release mode, this doesn't panic - it wraps around
     let bytes = encoder.to_bytes();
-    assert_eq!(bytes.len(), HEADER_SIZE); // Header only for single reading
+    assert_eq!(bytes.len(), header_size_for_value_bytes(i32::BYTES)); // Header only for single reading
 
     // The base_ts_offset will be a wrapped value (very large number)
     // In new header format, base_ts_offset is at offset 0
@@ -856,12 +857,13 @@ fn test_alternating_readings_same_interval_averaged() {
 
     // Size check: with appendable format, bits stay in header's bit_accum until 8+ bits
     // 4 zeros = 4 bits, which stays in the header (not yet flushed to data section)
-    // So buffer is just HEADER_SIZE (36 bytes)
+    // So buffer is just header_size for i32 (26 bytes)
+    let expected_header_size = header_size_for_value_bytes(i32::BYTES);
     let size = encoder.size();
     assert_eq!(
-        size, HEADER_SIZE,
+        size, expected_header_size,
         "expected size of {} bytes (header only, 4 bits still in accumulator), got {}",
-        HEADER_SIZE,
+        expected_header_size,
         size
     );
 }
@@ -1291,19 +1293,23 @@ fn test_large_timestamp_offset() {
 
 #[test]
 fn test_decode_truncated_header() {
-    // < HEADER_SIZE (26 bytes) should return empty vec
+    // Header size for i32: 4 + 2 + 2 + 4 + 4 + 8 + 1 + 1 = 26 bytes
+    let i32_header_size = header_size_for_value_bytes(i32::BYTES);
+    assert_eq!(i32_header_size, 26);
+
+    // < header_size should return empty vec
     assert!(decode::<i32, 300>(&[]).is_empty());
     assert!(decode::<i32, 300>(&[0]).is_empty());
     assert!(decode::<i32, 300>(&[0; 25]).is_empty());
 
-    // Exactly HEADER_SIZE bytes is valid header
-    let mut header = [0u8; HEADER_SIZE];
+    // Exactly header_size bytes is valid header
+    let mut header = vec![0u8; i32_header_size];
     // Set count to 0 - should return empty vec
     let decoded = decode::<i32, 300>(&header);
     assert!(decoded.is_empty());
 
     // Set count to 1, first_value as i32
-    // New header layout (26 bytes):
+    // i32 header layout (26 bytes):
     // [0-3] base_ts_offset, [4-5] count, [6-7] prev_logical_idx,
     // [8-11] first_value, [12-15] prev_value, [16-23] pending_avg,
     // [24] bit_count, [25] bit_accum

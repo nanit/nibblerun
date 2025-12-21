@@ -39,7 +39,8 @@
       "Bash(RUST_BACKTRACE=1 cargo +nightly fuzz run:*)",
       "Bash(RUST_BACKTRACE=full cargo +nightly fuzz run:*)",
       "Bash(cargo add:*)",
-      "WebFetch(domain:docs.rs)"
+      "WebFetch(domain:docs.rs)",
+      "Bash(./target/release/nbl-bench:*)"
     ],
     "deny": [],
     "ask": []
