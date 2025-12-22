@@ -1,0 +1,834 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 3090" font-family="Monaco, Consolas, monospace" font-size="12">
+  <defs>
+    <style>
+      .title { font-size: 18px; font-weight: bold; fill: #333; }
+      .subtitle { font-size: 14px; fill: #666; }
+      .label { font-size: 11px; fill: #444; }
+      .value { font-size: 11px; fill: #000; font-weight: bold; }
+      .bits { font-size: 10px; fill: #333; font-family: Monaco, Consolas, monospace; }
+      .insight { font-size: 11px; fill: #2563eb; font-style: italic; }
+      .header-unchanged { fill: #e5e7eb; stroke: #9ca3af; }
+      .header-changed { fill: #fef3c7; stroke: #f59e0b; }
+      .data-unchanged { fill: #ede9fe; stroke: #a78bfa; }
+      .data-new { fill: #d1fae5; stroke: #34d399; }
+      .accumulator { fill: #dbeafe; stroke: #3b82f6; }
+      .arrow { fill: none; stroke: #6b7280; stroke-width: 2; marker-end: url(#arrowhead); }
+      .section-bg { fill: #fafafa; stroke: #e5e7eb; rx: 8; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
+    </marker>
+  </defs>
+
+  <!-- Main Title -->
+  <text x="460" y="35" text-anchor="middle" class="title" font-size="22">NibbleRun Appendable Binary Format</text>
+  <text x="460" y="55" text-anchor="middle" class="subtitle">How O(1) appending works: before → after state transitions</text>
+
+  <!-- Header Layout Reference -->
+  <g transform="translate(50, 75)">
+    <rect x="0" y="0" width="820" height="100" class="section-bg"/>
+    <text x="10" y="20" class="subtitle" font-weight="bold">Header Layout (i8 values, 14 bytes total):</text>
+    <g transform="translate(10, 35)">
+      <rect x="0" y="0" width="60" height="30" class="header-unchanged"/>
+      <text x="30" y="12" text-anchor="middle" class="label">base_ts</text>
+      <text x="30" y="25" text-anchor="middle" class="bits">4 bytes</text>
+
+      <rect x="65" y="0" width="45" height="30" class="header-unchanged"/>
+      <text x="87" y="12" text-anchor="middle" class="label">count</text>
+      <text x="87" y="25" text-anchor="middle" class="bits">2 bytes</text>
+
+      <rect x="115" y="0" width="55" height="30" class="header-unchanged"/>
+      <text x="142" y="12" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="25" text-anchor="middle" class="bits">2 bytes</text>
+
+      <rect x="175" y="0" width="50" height="30" class="header-unchanged"/>
+      <text x="200" y="12" text-anchor="middle" class="label">first_v</text>
+      <text x="200" y="25" text-anchor="middle" class="bits">1 byte</text>
+
+      <rect x="230" y="0" width="50" height="30" class="header-unchanged"/>
+      <text x="255" y="12" text-anchor="middle" class="label">prev_v</text>
+      <text x="255" y="25" text-anchor="middle" class="bits">1 byte</text>
+
+      <rect x="285" y="0" width="50" height="30" class="header-unchanged"/>
+      <text x="310" y="12" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="25" text-anchor="middle" class="bits">1 byte</text>
+
+      <rect x="340" y="0" width="55" height="30" class="header-unchanged"/>
+      <text x="367" y="12" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="25" text-anchor="middle" class="bits">1 byte</text>
+
+      <rect x="400" y="0" width="50" height="30" class="accumulator"/>
+      <text x="425" y="12" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="25" text-anchor="middle" class="bits">1 byte</text>
+
+      <rect x="455" y="0" width="75" height="30" class="accumulator"/>
+      <text x="492" y="12" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="25" text-anchor="middle" class="bits">1 byte</text>
+
+      <rect x="535" y="0" width="80" height="30" class="data-unchanged"/>
+      <text x="575" y="12" text-anchor="middle" class="label">data...</text>
+      <text x="575" y="25" text-anchor="middle" class="bits">variable</text>
+    </g>
+    <text x="10" y="80" class="bits">bit_cnt = number of bits in accumulator (0-7) | bit_acc = partial byte buffer | When bit_cnt reaches 8, byte flushes to data[]</text>
+  </g>
+
+  <!-- Scenario 1: Zero Delta -->
+  <g transform="translate(50, 195)">
+    <rect x="0" y="0" width="820" height="280" class="section-bg"/>
+    <text x="15" y="25" class="title">Scenario 1: Append Same Value (Zero Delta)</text>
+    <text x="15" y="45" class="subtitle">Appending temp=25 when current is already 25. Zero deltas are buffered in zero_run, not written immediately.</text>
+
+    <!-- Before State -->
+    <text x="15" y="75" class="label" font-weight="bold">BEFORE (2 readings, temp=25, zero_run=1):</text>
+    <g transform="translate(15, 85)">
+      <rect x="65" y="0" width="45" height="35" class="header-unchanged"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">2</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">1</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-unchanged"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">25</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">1</text>
+
+      <rect x="400" y="0" width="50" height="35" class="accumulator"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="455" y="0" width="75" height="35" class="accumulator"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0x00</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-unchanged"/>
+      <text x="575" y="22" text-anchor="middle" class="bits">(empty)</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 400 135 L 400 155" class="arrow"/>
+    <text x="415" y="150" class="label" fill="#059669">append(ts, 25)</text>
+
+    <!-- After State -->
+    <text x="15" y="175" class="label" font-weight="bold">AFTER (3 readings):</text>
+    <g transform="translate(15, 185)">
+      <rect x="65" y="0" width="45" height="35" class="header-changed"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">3</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-changed"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">2</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-unchanged"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">25</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-changed"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">2</text>
+
+      <rect x="400" y="0" width="50" height="35" class="accumulator"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="455" y="0" width="75" height="35" class="accumulator"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0x00</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-unchanged"/>
+      <text x="575" y="22" text-anchor="middle" class="bits">(empty)</text>
+    </g>
+
+    <text x="15" y="255" class="insight">Key insight: Zero deltas just increment zero_run counter. No bits written anywhere!</text>
+    <text x="15" y="270" class="insight">The zeros will be flushed later when a non-zero delta arrives.</text>
+  </g>
+
+  <!-- Scenario 2: +1 Delta (IMPROVED) -->
+  <g transform="translate(50, 490)">
+    <rect x="0" y="0" width="820" height="360" class="section-bg"/>
+    <text x="15" y="25" class="title">Scenario 2: Append Different Value (+1 Delta)</text>
+    <text x="15" y="45" class="subtitle">Appending temp=26 when current is 25. Flushes buffered zeros to accumulator, then writes delta bits.</text>
+
+    <!-- Before State -->
+    <text x="15" y="75" class="label" font-weight="bold">BEFORE (4 readings, temp=25, zero_run=3):</text>
+    <g transform="translate(15, 85)">
+      <rect x="65" y="0" width="45" height="35" class="header-unchanged"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">4</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">3</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-unchanged"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">25</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">3</text>
+
+      <rect x="400" y="0" width="50" height="35" class="accumulator"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="455" y="0" width="75" height="35" class="accumulator"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0b00000000</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-unchanged"/>
+      <text x="575" y="22" text-anchor="middle" class="bits">(empty)</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 400 135 L 400 155" class="arrow"/>
+    <text x="415" y="150" class="label" fill="#059669">append(ts, 26)</text>
+    <text x="415" y="163" class="label" fill="#dc2626">delta = +1</text>
+
+    <!-- After State -->
+    <text x="15" y="185" class="label" font-weight="bold">AFTER (5 readings, temp=26):</text>
+    <g transform="translate(15, 195)">
+      <rect x="65" y="0" width="45" height="35" class="header-changed"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">5</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-changed"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">4</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-changed"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">26</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-changed"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="400" y="0" width="50" height="35" class="header-changed"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">6</text>
+
+      <rect x="455" y="0" width="75" height="35" class="header-changed"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0b00000100</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-unchanged"/>
+      <text x="575" y="22" text-anchor="middle" class="bits">(still empty!)</text>
+    </g>
+
+    <!-- Bit accumulator visualization -->
+    <text x="15" y="255" class="label" font-weight="bold">How bits accumulate in bit_acc:</text>
+    <g transform="translate(15, 265)">
+      <!-- 8-bit accumulator boxes -->
+      <rect x="0" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="12" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="27" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="39" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="54" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="66" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="81" y="0" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="93" y="17" text-anchor="middle" class="value">1</text>
+      <rect x="108" y="0" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="120" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="135" y="0" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="147" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="162" y="0" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="174" y="17" text-anchor="middle" class="bits">-</text>
+      <rect x="189" y="0" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="201" y="17" text-anchor="middle" class="bits">-</text>
+
+      <text x="225" y="17" class="bits">← bit_cnt=6 (6 bits used, 2 empty)</text>
+    </g>
+
+    <g transform="translate(15, 300)">
+      <text x="0" y="0" class="bits" fill="#34d399">■ Green: 3 zero bits (flushed from zero_run=3)</text>
+      <text x="0" y="15" class="bits" fill="#f59e0b">■ Yellow: "100" = +1 delta code</text>
+      <text x="0" y="30" class="bits" fill="#9ca3af">■ Gray: Empty slots (will fill with next bits)</text>
+    </g>
+
+    <text x="15" y="345" class="insight">Key insight: data[] is still empty! Bits live in bit_acc until we have 8 bits.</text>
+    <text x="15" y="360" class="insight">When bit_cnt reaches 8, the byte flushes from bit_acc → data[], and bit_cnt resets to 0.</text>
+  </g>
+
+  <!-- Scenario 2b: What happens when accumulator fills -->
+  <g transform="translate(50, 865)">
+    <rect x="0" y="0" width="820" height="450" class="section-bg"/>
+    <text x="15" y="25" class="title">Scenario 2b: Accumulator Fills → Byte Flushes to data[]</text>
+    <text x="15" y="45" class="subtitle">Continuing from above: append another +1 delta. Now bit_cnt=6+3=9, so 8 bits flush to data[].</text>
+
+    <!-- Before State -->
+    <text x="15" y="75" class="label" font-weight="bold">BEFORE (bit_cnt=6, need to write 3 more bits):</text>
+    <g transform="translate(15, 85)">
+      <rect x="65" y="0" width="45" height="35" class="header-unchanged"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">5</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">4</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-unchanged"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">26</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="400" y="0" width="50" height="35" class="accumulator"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">6</text>
+
+      <rect x="455" y="0" width="75" height="35" class="accumulator"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0b00000100</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-unchanged"/>
+      <text x="575" y="22" text-anchor="middle" class="bits">(empty)</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 400 135 L 400 155" class="arrow"/>
+    <text x="415" y="150" class="label" fill="#059669">append(ts, 27)</text>
+    <text x="415" y="163" class="label" fill="#dc2626">delta = +1 → "100" (3 bits)</text>
+
+    <!-- After State -->
+    <text x="15" y="185" class="label" font-weight="bold">AFTER (bit_cnt=6+3=9 → flush 8, keep 1):</text>
+    <g transform="translate(15, 195)">
+      <rect x="65" y="0" width="45" height="35" class="header-changed"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">6</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-changed"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">5</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-changed"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">27</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="400" y="0" width="50" height="35" class="header-changed"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">1</text>
+
+      <rect x="455" y="0" width="75" height="35" class="header-changed"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0b00000000</text>
+
+      <rect x="535" y="0" width="95" height="35" class="data-new"/>
+      <text x="582" y="15" text-anchor="middle" class="label">data[0]</text>
+      <text x="582" y="30" text-anchor="middle" class="value">0b00010010</text>
+    </g>
+
+    <!-- Bit accumulator visualization - BEFORE -->
+    <text x="15" y="255" class="label" font-weight="bold">BEFORE: bit_acc with 6 bits</text>
+    <g transform="translate(15, 265)">
+      <rect x="0" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="12" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="27" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="39" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="54" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="66" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="81" y="0" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="93" y="17" text-anchor="middle" class="value">1</text>
+      <rect x="108" y="0" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="120" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="135" y="0" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="147" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="162" y="0" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="174" y="17" text-anchor="middle" class="bits">-</text>
+      <rect x="189" y="0" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="201" y="17" text-anchor="middle" class="bits">-</text>
+      <text x="225" y="17" class="bits">← 6 bits from scenario 2</text>
+    </g>
+
+    <!-- Add new bits -->
+    <text x="15" y="310" class="label" font-weight="bold">ADD: 3 new bits "100" (+1 delta)</text>
+    <g transform="translate(15, 320)">
+      <rect x="0" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="12" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="27" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="39" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="54" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="66" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="81" y="0" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="93" y="17" text-anchor="middle" class="value">1</text>
+      <rect x="108" y="0" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="120" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="135" y="0" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="147" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="162" y="0" width="25" height="25" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+      <text x="174" y="17" text-anchor="middle" class="value">1</text>
+      <rect x="189" y="0" width="25" height="25" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+      <text x="201" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="216" y="0" width="25" height="25" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+      <text x="228" y="17" text-anchor="middle" class="value">0</text>
+      <text x="255" y="17" class="bits">← 9 bits total (overflow!)</text>
+    </g>
+
+    <!-- Result -->
+    <text x="15" y="365" class="label" font-weight="bold">RESULT: First 8 bits → data[0], bit 9 stays in bit_acc</text>
+    <g transform="translate(15, 395)">
+      <!-- New bit_acc state (1 bit) -->
+      <text x="0" y="-5" class="bits" font-weight="bold">bit_acc (1 bit):</text>
+      <rect x="0" y="5" width="25" height="25" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+      <text x="12" y="22" text-anchor="middle" class="value">0</text>
+      <rect x="27" y="5" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="39" y="22" text-anchor="middle" class="bits">-</text>
+      <rect x="54" y="5" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="66" y="22" text-anchor="middle" class="bits">-</text>
+      <rect x="81" y="5" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="93" y="22" text-anchor="middle" class="bits">-</text>
+      <rect x="108" y="5" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="120" y="22" text-anchor="middle" class="bits">-</text>
+      <rect x="135" y="5" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="147" y="22" text-anchor="middle" class="bits">-</text>
+      <rect x="162" y="5" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="174" y="22" text-anchor="middle" class="bits">-</text>
+      <rect x="189" y="5" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="201" y="22" text-anchor="middle" class="bits">-</text>
+
+      <!-- data[0] (flushed byte) -->
+      <text x="280" y="-5" class="bits" font-weight="bold">data[0] (flushed):</text>
+      <rect x="280" y="5" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="292" y="22" text-anchor="middle" class="value">0</text>
+      <rect x="307" y="5" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="319" y="22" text-anchor="middle" class="value">0</text>
+      <rect x="334" y="5" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="346" y="22" text-anchor="middle" class="value">0</text>
+      <rect x="361" y="5" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="373" y="22" text-anchor="middle" class="value">1</text>
+      <rect x="388" y="5" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="400" y="22" text-anchor="middle" class="value">0</text>
+      <rect x="415" y="5" width="25" height="25" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+      <text x="427" y="22" text-anchor="middle" class="value">0</text>
+      <rect x="442" y="5" width="25" height="25" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+      <text x="454" y="22" text-anchor="middle" class="value">1</text>
+      <rect x="469" y="5" width="25" height="25" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+      <text x="481" y="22" text-anchor="middle" class="value">0</text>
+      <text x="505" y="22" class="bits">= 0x12</text>
+    </g>
+
+    <text x="15" y="440" class="insight">Key insight: When bit_cnt ≥ 8, the first 8 bits flush to data[], remainder stays in bit_acc.</text>
+  </g>
+
+  <!-- Scenario 3: Zero Run Threshold -->
+  <g transform="translate(50, 1330)">
+    <rect x="0" y="0" width="820" height="280" class="section-bg"/>
+    <text x="15" y="25" class="title">Scenario 3: Zero Run Threshold (7 → 8)</text>
+    <text x="15" y="45" class="subtitle">When zero_run exceeds 7, run-length encoding becomes more efficient than individual bits.</text>
+
+    <!-- Before State -->
+    <text x="15" y="75" class="label" font-weight="bold">BEFORE (zero_run=7, temp=25):</text>
+    <g transform="translate(15, 85)">
+      <rect x="65" y="0" width="45" height="35" class="header-unchanged"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">8</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">7</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-unchanged"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">25</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">7</text>
+
+      <rect x="400" y="0" width="50" height="35" class="accumulator"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="455" y="0" width="75" height="35" class="accumulator"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0x00</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-unchanged"/>
+      <text x="575" y="22" text-anchor="middle" class="bits">(empty)</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 400 135 L 400 155" class="arrow"/>
+    <text x="415" y="150" class="label" fill="#059669">append(ts, 25) same value</text>
+
+    <!-- After State -->
+    <text x="15" y="175" class="label" font-weight="bold">AFTER (zero_run=8):</text>
+    <g transform="translate(15, 185)">
+      <rect x="65" y="0" width="45" height="35" class="header-changed"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">9</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-changed"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">8</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-unchanged"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">25</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-changed"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">8</text>
+
+      <rect x="400" y="0" width="50" height="35" class="accumulator"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="455" y="0" width="75" height="35" class="accumulator"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0x00</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-unchanged"/>
+      <text x="575" y="22" text-anchor="middle" class="bits">(empty)</text>
+    </g>
+
+    <!-- Encoding comparison -->
+    <text x="15" y="250" class="label" font-weight="bold">When eventually flushed:</text>
+    <text x="15" y="265" class="bits">7 zeros → 0000000 (7 individual bits) | 8 zeros → 11110_0000 (9-bit run code) | 21 zeros → 11110_1101 (still 9 bits!)</text>
+  </g>
+
+  <!-- Scenario 4: Single Gap -->
+  <g transform="translate(50, 1625)">
+    <rect x="0" y="0" width="820" height="440" class="section-bg"/>
+    <text x="15" y="25" class="title">Scenario 4: Single-Interval Gap (detected when new reading arrives)</text>
+    <text x="15" y="45" class="subtitle">New reading at interval 7 reveals that interval 6 was skipped. Accumulated zeros flushed BEFORE gap marker.</text>
+
+    <!-- Before State -->
+    <text x="15" y="75" class="label" font-weight="bold">BEFORE (last reading at interval 5, temp=25, already had 3 consecutive 25s):</text>
+    <g transform="translate(15, 85)">
+      <rect x="65" y="0" width="45" height="35" class="header-unchanged"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">5</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">5</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-unchanged"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">25</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">3</text>
+
+      <rect x="400" y="0" width="50" height="35" class="accumulator"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="455" y="0" width="75" height="35" class="accumulator"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0x00</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-unchanged"/>
+      <text x="575" y="22" text-anchor="middle" class="bits">(empty)</text>
+    </g>
+
+    <!-- Arrow with incoming reading -->
+    <path d="M 400 135 L 400 155" class="arrow"/>
+    <text x="415" y="147" class="label" fill="#059669">append(ts=base+7*300, value=25)</text>
+    <text x="415" y="160" class="label" fill="#666">new_idx = 7</text>
+
+    <!-- Gap detection explanation -->
+    <text x="15" y="180" class="label" font-weight="bold">GAP DETECTION: new_idx(7) - prev_idx(5) - 1 = 1 gap</text>
+    <text x="15" y="195" class="label">Steps: 1. Flush zero_run=3 → write "000"  2. Write gap marker "110"  3. Handle value (delta=0 → zero_run=1)</text>
+
+    <!-- After State -->
+    <text x="15" y="220" class="label" font-weight="bold">AFTER:</text>
+    <g transform="translate(15, 230)">
+      <rect x="65" y="0" width="45" height="35" class="header-changed"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">6</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-changed"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">7</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-unchanged"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">25</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-changed"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">1</text>
+
+      <rect x="400" y="0" width="50" height="35" class="header-changed"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">6</text>
+
+      <rect x="455" y="0" width="75" height="35" class="header-changed"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0b00000110</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-unchanged"/>
+      <text x="575" y="22" text-anchor="middle" class="bits">(empty)</text>
+    </g>
+
+    <!-- Bit accumulator visualization -->
+    <text x="15" y="290" class="label" font-weight="bold">What went into bit_acc (in order):</text>
+    <g transform="translate(15, 300)">
+      <rect x="0" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="12" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="27" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="39" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="54" y="0" width="25" height="25" fill="#d1fae5" stroke="#34d399" stroke-width="2"/>
+      <text x="66" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="81" y="0" width="25" height="25" fill="#fee2e2" stroke="#ef4444" stroke-width="2"/>
+      <text x="93" y="17" text-anchor="middle" class="value">1</text>
+      <rect x="108" y="0" width="25" height="25" fill="#fee2e2" stroke="#ef4444" stroke-width="2"/>
+      <text x="120" y="17" text-anchor="middle" class="value">1</text>
+      <rect x="135" y="0" width="25" height="25" fill="#fee2e2" stroke="#ef4444" stroke-width="2"/>
+      <text x="147" y="17" text-anchor="middle" class="value">0</text>
+      <rect x="162" y="0" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="174" y="17" text-anchor="middle" class="bits">-</text>
+      <rect x="189" y="0" width="25" height="25" fill="#e5e7eb" stroke="#9ca3af"/>
+      <text x="201" y="17" text-anchor="middle" class="bits">-</text>
+      <text x="225" y="17" class="bits">← "000" (zeros) + "110" (gap) = 6 bits</text>
+    </g>
+    <text x="15" y="340" class="bits" fill="#34d399">■ Green: Flushed zeros (3 bits from zero_run=3)</text>
+    <text x="15" y="355" class="bits" fill="#ef4444">■ Red: Gap marker "110" (3 bits)</text>
+    <text x="15" y="370" class="bits">Value=25 same as curr_v → delta=0 → zero_run=1 (deferred, no bits written yet)</text>
+
+    <text x="15" y="410" class="insight">CRITICAL: Zeros always flushed BEFORE gap marker! Bitstream preserves temporal order: &lt;zeros&gt;&lt;gap&gt;&lt;zeros&gt;&lt;gap&gt;&lt;delta&gt;</text>
+    <text x="15" y="428" class="insight">This ensures decoder reconstructs readings in correct chronological order.</text>
+  </g>
+
+  <!-- Scenario 5: Large Gap -->
+  <g transform="translate(50, 2080)">
+    <rect x="0" y="0" width="820" height="280" class="section-bg"/>
+    <text x="15" y="25" class="title">Scenario 5: Large Gap (2-65 intervals)</text>
+    <text x="15" y="45" class="subtitle">Missing 10 readings. Uses 14-bit encoding: "11111111" prefix + 6-bit gap value.</text>
+
+    <!-- Before State -->
+    <text x="15" y="75" class="label" font-weight="bold">BEFORE (interval_idx=10, temp=25):</text>
+    <g transform="translate(15, 85)">
+      <rect x="65" y="0" width="45" height="35" class="header-unchanged"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">10</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">10</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-unchanged"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">25</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="400" y="0" width="50" height="35" class="accumulator"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="455" y="0" width="75" height="35" class="accumulator"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0x00</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-unchanged"/>
+      <text x="575" y="22" text-anchor="middle" class="bits">(empty)</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 400 135 L 400 155" class="arrow"/>
+    <text x="415" y="147" class="label" fill="#059669">append(ts @ idx=20, 25)</text>
+    <text x="415" y="160" class="label" fill="#dc2626">gap of 10 intervals!</text>
+
+    <!-- After State -->
+    <text x="15" y="180" class="label" font-weight="bold">AFTER (14 bits written: 8 to data, 6 in accumulator):</text>
+    <g transform="translate(15, 190)">
+      <rect x="65" y="0" width="45" height="35" class="header-changed"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">11</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-changed"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">20</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-unchanged"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">25</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-changed"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">1</text>
+
+      <rect x="400" y="0" width="50" height="35" class="header-changed"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">6</text>
+
+      <rect x="455" y="0" width="75" height="35" class="header-changed"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0b00001000</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-new"/>
+      <text x="575" y="15" text-anchor="middle" class="label">data[0]</text>
+      <text x="575" y="30" text-anchor="middle" class="value">0xFF</text>
+    </g>
+
+    <text x="15" y="250" class="bits">14 bits = 11111111 (prefix, 8 bits → data[0]) + 001000 (gap-2=8, 6 bits → bit_acc)</text>
+    <text x="15" y="270" class="insight">Key insight: Gap value stored as (gap - 2) since gaps 0-1 use other encodings.</text>
+  </g>
+
+  <!-- Scenario 6: Large Delta -->
+  <g transform="translate(50, 2375)">
+    <rect x="0" y="0" width="820" height="280" class="section-bg"/>
+    <text x="15" y="25" class="title">Scenario 6: Large Delta (overflow to 19-bit encoding)</text>
+    <text x="15" y="45" class="subtitle">Delta of +25 exceeds ±10 range, requiring 19-bit large delta encoding.</text>
+
+    <!-- Before State -->
+    <text x="15" y="75" class="label" font-weight="bold">BEFORE (temp=25):</text>
+    <g transform="translate(15, 85)">
+      <rect x="65" y="0" width="45" height="35" class="header-unchanged"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">5</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">4</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-unchanged"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">25</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="400" y="0" width="50" height="35" class="accumulator"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="455" y="0" width="75" height="35" class="accumulator"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0x00</text>
+
+      <rect x="535" y="0" width="80" height="35" class="data-unchanged"/>
+      <text x="575" y="22" text-anchor="middle" class="bits">(empty)</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 400 135 L 400 155" class="arrow"/>
+    <text x="415" y="147" class="label" fill="#059669">append(ts, 50)</text>
+    <text x="415" y="160" class="label" fill="#dc2626">delta = +25!</text>
+
+    <!-- After State -->
+    <text x="15" y="180" class="label" font-weight="bold">AFTER (19 bits: 16 to data, 3 in accumulator):</text>
+    <g transform="translate(15, 190)">
+      <rect x="65" y="0" width="45" height="35" class="header-changed"/>
+      <text x="87" y="15" text-anchor="middle" class="label">count</text>
+      <text x="87" y="30" text-anchor="middle" class="value">6</text>
+
+      <rect x="115" y="0" width="55" height="35" class="header-changed"/>
+      <text x="142" y="15" text-anchor="middle" class="label">prev_idx</text>
+      <text x="142" y="30" text-anchor="middle" class="value">5</text>
+
+      <rect x="285" y="0" width="50" height="35" class="header-changed"/>
+      <text x="310" y="15" text-anchor="middle" class="label">curr_v</text>
+      <text x="310" y="30" text-anchor="middle" class="value">50</text>
+
+      <rect x="340" y="0" width="55" height="35" class="header-unchanged"/>
+      <text x="367" y="15" text-anchor="middle" class="label">zero_run</text>
+      <text x="367" y="30" text-anchor="middle" class="value">0</text>
+
+      <rect x="400" y="0" width="50" height="35" class="header-changed"/>
+      <text x="425" y="15" text-anchor="middle" class="label">bit_cnt</text>
+      <text x="425" y="30" text-anchor="middle" class="value">3</text>
+
+      <rect x="455" y="0" width="75" height="35" class="header-changed"/>
+      <text x="492" y="15" text-anchor="middle" class="label">bit_acc</text>
+      <text x="492" y="30" text-anchor="middle" class="value">0b00000001</text>
+
+      <rect x="535" y="0" width="95" height="35" class="data-new"/>
+      <text x="582" y="15" text-anchor="middle" class="label">data</text>
+      <text x="582" y="30" text-anchor="middle" class="value">0xFE 0x19</text>
+    </g>
+
+    <text x="15" y="250" class="bits">19 bits = 11111110 (prefix) + 00000011001 (25 in 11-bit signed) = 0xFE 0x19 + 3 bits in acc</text>
+    <text x="15" y="270" class="insight">Key insight: Deltas ±11 to ±1023 use 19-bit encoding. Beyond ±1023, append fails.</text>
+  </g>
+
+  <!-- Legend and Quick Reference -->
+  <g transform="translate(50, 2670)">
+    <rect x="0" y="0" width="820" height="400" class="section-bg"/>
+    <text x="15" y="25" class="title">Quick Reference</text>
+
+    <!-- Legend -->
+    <g transform="translate(15, 45)">
+      <rect x="0" y="0" width="25" height="18" class="header-unchanged"/>
+      <text x="35" y="13" class="label">Unchanged</text>
+
+      <rect x="120" y="0" width="25" height="18" class="header-changed"/>
+      <text x="155" y="13" class="label">Changed</text>
+
+      <rect x="240" y="0" width="25" height="18" class="accumulator"/>
+      <text x="275" y="13" class="label">Bit accumulator</text>
+
+      <rect x="400" y="0" width="25" height="18" class="data-new"/>
+      <text x="435" y="13" class="label">New data bytes</text>
+
+      <rect x="560" y="0" width="25" height="18" class="data-unchanged"/>
+      <text x="595" y="13" class="label">Existing data</text>
+    </g>
+
+    <!-- Delta encoding -->
+    <g transform="translate(15, 80)">
+      <text x="0" y="0" class="subtitle" font-weight="bold">Delta Encoding:</text>
+      <text x="0" y="18" class="bits">0              (1 bit)   → delta = 0 (same value, buffered in zero_run)</text>
+      <text x="0" y="33" class="bits">100            (3 bits)  → delta = +1</text>
+      <text x="0" y="48" class="bits">101            (3 bits)  → delta = -1</text>
+      <text x="0" y="63" class="bits">110            (3 bits)  → single-interval gap</text>
+      <text x="0" y="78" class="bits">11100          (5 bits)  → delta = +2</text>
+      <text x="0" y="93" class="bits">11101          (5 bits)  → delta = -2</text>
+      <text x="0" y="108" class="bits">1111110xxxx    (11 bits) → delta = ±3 to ±10</text>
+      <text x="0" y="123" class="bits">11111110...    (19 bits) → delta = ±11 to ±1023</text>
+      <text x="0" y="138" class="bits">11111111xxxxxx (14 bits) → gap of 2-65 intervals</text>
+    </g>
+
+    <!-- Zero run encoding -->
+    <g transform="translate(420, 80)">
+      <text x="0" y="0" class="subtitle" font-weight="bold">Zero Run Encoding (when flushed):</text>
+      <text x="0" y="18" class="bits">1-7 zeros  → individual 0 bits (1-7 bits)</text>
+      <text x="0" y="33" class="bits">8-21 zeros → 11110xxxx (9 bits)</text>
+      <text x="0" y="48" class="bits">22-149     → 111110xxxxxxx (13 bits)</text>
+      <text x="0" y="63" class="bits">150+       → multiple 13-bit chunks</text>
+    </g>
+
+    <!-- Why O(1) -->
+    <g transform="translate(420, 155)">
+      <text x="0" y="0" class="subtitle" font-weight="bold">Why O(1) Append?</text>
+      <text x="0" y="18" class="bits">• Header tracks all state (14 bytes)</text>
+      <text x="0" y="33" class="bits">• bit_acc buffers partial bytes (0-7 bits)</text>
+      <text x="0" y="48" class="bits">• zero_run defers zero deltas</text>
+      <text x="0" y="63" class="bits">• Only append to data[], never rewrite</text>
+      <text x="0" y="78" class="bits">• Each append: O(1) header updates</text>
+      <text x="0" y="93" class="bits">           + O(1) bit writes (max ~2 bytes)</text>
+    </g>
+
+    <!-- Flow diagram -->
+    <g transform="translate(15, 250)">
+      <text x="0" y="0" class="subtitle" font-weight="bold">Append Flow:</text>
+      <text x="0" y="20" class="bits">append(ts, value)</text>
+      <text x="0" y="35" class="bits">    │</text>
+      <text x="0" y="50" class="bits">    ├─ if gap detected → write gap marker bits</text>
+      <text x="0" y="65" class="bits">    │</text>
+      <text x="0" y="80" class="bits">    ├─ if delta == 0 → zero_run++ (no bits written!)</text>
+      <text x="0" y="95" class="bits">    │</text>
+      <text x="0" y="110" class="bits">    └─ if delta != 0 → flush zero_run as bits, then write delta bits</text>
+      <text x="0" y="125" class="bits">                        │</text>
+      <text x="0" y="140" class="bits">                        └─ bits go to bit_acc, overflow (≥8) flushes to data[]</text>
+    </g>
+  </g>
+</svg>

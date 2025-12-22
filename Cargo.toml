@@ -13,6 +13,12 @@ tsz = "0.1.4"
 tikv-jemallocator = { version = "0.6.1", features = ["stats"] }
 tikv-jemalloc-ctl = { version = "0.6.1", features = ["stats"] }
 rustc-hash = "2.1.1"
+lz4_flex = "0.11"
+zstd = "0.13"
+pco = "0.3"
+snap = "1"
+brotli = "7"
+flate2 = "1"
 
 [dev-dependencies]
 proptest = "1.0"
@@ -33,6 +39,10 @@ path = "src/bin/nbl_analyze.rs"
 [[bin]]
 name = "nbl-bench"
 path = "src/bin/nbl_bench.rs"
+
+[[bin]]
+name = "nbl-bench-others"
+path = "src/bin/nbl_bench_others.rs"
 
 [[bench]]
 name = "benchmarks"

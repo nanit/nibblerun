@@ -107,10 +107,20 @@ Missing intervals (sensor offline, network issues) are encoded efficiently:
 
 ### Wire Format
 
-The encoded format consists of a header (7-10 bytes depending on value type) followed by bit-packed data:
+NibbleRun supports two binary formats:
+
+#### Frozen Format (for storage/distribution)
+
+Use `freeze()` to convert to this compact read-only format:
+
+| Header Size | Value Type |
+|-------------|------------|
+| 7 bytes | i8 |
+| 8 bytes | i16 |
+| 10 bytes | i32 |
 
 ```
-Header (10 bytes for i32, 8 for i16, 7 for i8):
+Frozen Header:
 ┌─────────────────┬─────────┬─────────────┐
 │ base_ts_offset  │  count  │ first_value │
 │    (4 bytes)    │(2 bytes)│  (1/2/4)    │
@@ -123,32 +133,58 @@ Data: Variable-length bit-packed deltas and zero-runs
 - `count`: Number of readings (max 65,535)
 - `first_value`: First value (size depends on type: i8=1, i16=2, i32=4 bytes)
 
-Note: The interval is NOT stored in the header - it must be provided to the decoder.
+#### Appendable Format (for continued appending)
+
+Used by `Encoder::to_bytes()` - includes append state for O(1) resumption:
+
+| Header Size | Value Type |
+|-------------|------------|
+| 14 bytes | i8 |
+| 16 bytes | i16 |
+| 20 bytes | i32 |
+
+The appendable format stores additional state (prev_value, current_value, zero_run, bit accumulator) enabling O(1) append operations when resumed via `Encoder::from_bytes()`.
+
+See [docs/appendable-format.md](docs/appendable-format.md) for full specification.
+
+#### Using freeze()
+
+```rust
+use nibblerun::{Encoder, freeze, decode_frozen};
+
+let mut enc: Encoder<i8> = Encoder::new();
+enc.append(1761000000, 22).unwrap();
+enc.append(1761000300, 23).unwrap();
+
+// Get appendable format (can resume later with from_bytes)
+let appendable = enc.to_bytes();  // 14+ bytes header for i8
+
+// Get frozen format (compact, read-only)
+let frozen = freeze::<i8, 300>(&appendable);  // 7+ bytes header for i8
+
+// Decode frozen format
+let readings = decode_frozen::<i8, 300>(&frozen);
+```
+
+Note: The interval is NOT stored in either format - it must be provided to the decoder.
 
 ### Memory Layout
 
-The `Encoder<V, const INTERVAL: u16 = 300>` struct is optimized for cache efficiency (56-64 bytes depending on value type):
+The `Encoder<V, const INTERVAL: u16 = 300>` struct wraps an internal byte buffer in appendable format:
 
 ```rust
 Encoder<V, const INTERVAL: u16 = 300> {
-    pending_avg: u64,      // Packed averaging state (count + sum)
-    bit_accum: u32,        // Bit accumulator for encoding
-    data: Vec<u8>,         // Encoded output buffer (24 bytes on 64-bit)
-    base_ts_offset: u32,   // First timestamp minus epoch base
-    zero_run: u16,         // Current zero-run length
-    first_value: V,        // First value (for header)
-    prev_value: V,         // Previous value (for delta)
-    prev_logical_idx: u32, // Previous interval index
-    count: u16,            // Reading count
-    bit_count: u8,         // Bit accumulator count (0-31)
+    buf: Vec<u8>,           // Internal buffer in appendable format
+    _marker: PhantomData<V>, // Compile-time type info
 }
 ```
 
 The interval is a compile-time const generic, enabling compiler optimizations for division operations.
 
-The `pending_avg` field packs multiple values to avoid extra fields:
-- Bits 0-9: Pending reading count for averaging (0-1023)
-- Bits 10-41: Pending sum for averaging (full i32 range)
+All encoder state (timestamps, values, zero-run counter, bit accumulator) is stored directly in the byte buffer header, enabling:
+- **O(1) append**: No scanning of existing data
+- **Serialization**: `to_bytes()` returns a clone of the buffer
+- **Resumption**: `from_bytes()` reconstructs the encoder to continue appending
 
 ## Assumptions and Limitations
 
@@ -475,7 +511,7 @@ nbl-viz day.nbl  # creates day.svg
 ```
 
 The SVG shows:
-- **Header section**: 14 bytes with labeled fields (base_ts, duration, count, first_value, interval)
+- **Header section**: 7-14 bytes depending on format and value type (base_ts_offset, count, first_value, and append state if appendable format)
 - **Bit grid**: Each bit as a colored square, grouped by encoding type
 - **Span labels**: Decoded meaning below each bit group (+1, -2, run=5, gap=3, etc.)
 - **Decoded timeline**: Human-readable list of timestamps and values

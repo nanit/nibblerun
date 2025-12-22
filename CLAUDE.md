@@ -28,19 +28,22 @@ NibbleRun is a Rust library for high-performance lossless time series compressio
 - ±1 deltas use 3 bits
 - Larger deltas use 7-19 bits
 - Gap markers for missing sensor readings (SENTINEL_VALUE = -1000)
-- Fast division by 300 using multiplication by reciprocal
+- Fast division by interval using multiplication by reciprocal
 
-**Binary format** (10-byte header + variable bit-packed data):
+**Binary format** (two variants):
+- **Appendable format**: 14-20 byte header (depends on value type) + bit-packed data. Used by `Encoder::to_bytes()`, supports O(1) append resumption.
+- **Frozen format**: 7-10 byte header + bit-packed data. Created by `freeze()`, compact read-only format for storage.
 - Timestamps are stored as offsets from EPOCH_BASE (1,760,000,000)
-- Temperatures are stored as deltas from TEMP_BASE (20)
-- DEFAULT_INTERVAL is 300 seconds (5 minutes)
+- Values are stored as deltas with variable-length bit codes
+- DEFAULT_INTERVAL is 300 seconds (5 minutes), configurable via const generic
 
 ## Constraints
 
 - Uses Rust 2024 edition
-- Temperature range: -108 to 147 (i8 offset from base of 20)
+- Value types: i8, i16, i32 (generic)
 - Max readings per encoder: 65535
-- Interval: 300 seconds fixed
+- Max delta between readings: ±1023
+- Default interval: 300 seconds (configurable via const generic)
 
 ## Guidelines
 
