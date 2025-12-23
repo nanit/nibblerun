@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tikv_jemalloc_ctl::{epoch, stats};
+use nibblerun::Encoder;
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -163,106 +164,75 @@ fn run_naive(readings: &[(u32, u32, i8)]) -> HashMap<u32, Vec<(u32, i8)>> {
     storage
 }
 
-/// NibbleRun storage: HashMap<u32, Vec<u8>>
+/// NibbleRun storage: HashMap<u32, Encoder<i8, 300>>
 /// Returns the storage and compressed data size
-fn run_nibblerun_hashmap(readings: &[(u32, u32, i8)]) -> (HashMap<u32, Vec<u8>>, usize) {
-    let mut storage: HashMap<u32, Vec<u8>> = HashMap::new();
+fn run_nibblerun_hashmap(readings: &[(u32, u32, i8)]) -> (HashMap<u32, Encoder<i8, 300>>, usize) {
+    let mut storage: HashMap<u32, Encoder<i8, 300>> = HashMap::new();
     for &(device_id, ts, val) in readings {
-        if let Some(buf) = storage.get_mut(&device_id) {
-            let _ = nibblerun::appendable::append::<i8, 300>(buf, ts as u64, val);
-        } else {
-            let buf = nibblerun::appendable::create::<i8, 300>(ts as u64, val);
-            storage.insert(device_id, buf);
-        }
+        let encoder = storage.entry(device_id).or_insert_with(Encoder::new);
+        let _ = encoder.append(ts, val);
     }
 
-    // Calculate actual compressed data size and capacity
-    let total_data: usize = storage.values().map(|v| v.len()).sum();
-    let total_capacity: usize = storage.values().map(|v| v.capacity()).sum();
+    // Calculate actual compressed data size
+    let total_data: usize = storage.values().map(|e| e.size()).sum();
     let avg_data = total_data / storage.len();
-    let avg_capacity = total_capacity / storage.len();
 
     println!("  Stored {} devices (HashMap capacity: {})", storage.len(), storage.capacity());
     println!("  Compressed data: {:.1} MB total, {} bytes avg per device", total_data as f64 / (1024.0 * 1024.0), avg_data);
-    println!("  Vec capacity: {:.1} MB total, {} bytes avg per device", total_capacity as f64 / (1024.0 * 1024.0), avg_capacity);
 
     (storage, total_data)
 }
 
-/// NibbleRun storage: AHashMap<u32, Vec<u8>>
+/// NibbleRun storage: AHashMap<u32, Encoder<i8, 300>>
 /// Returns the storage and compressed data size
-fn run_nibblerun_ahash(readings: &[(u32, u32, i8)]) -> (AHashMap<u32, Vec<u8>>, usize) {
-    let mut storage: AHashMap<u32, Vec<u8>> = AHashMap::new();
+fn run_nibblerun_ahash(readings: &[(u32, u32, i8)]) -> (AHashMap<u32, Encoder<i8, 300>>, usize) {
+    let mut storage: AHashMap<u32, Encoder<i8, 300>> = AHashMap::new();
     for &(device_id, ts, val) in readings {
-        if let Some(buf) = storage.get_mut(&device_id) {
-            let _ = nibblerun::appendable::append::<i8, 300>(buf, ts as u64, val);
-        } else {
-            let buf = nibblerun::appendable::create::<i8, 300>(ts as u64, val);
-            storage.insert(device_id, buf);
-        }
+        let encoder = storage.entry(device_id).or_insert_with(Encoder::new);
+        let _ = encoder.append(ts, val);
     }
 
-    // Calculate actual compressed data size and capacity
-    let total_data: usize = storage.values().map(|v| v.len()).sum();
-    let total_capacity: usize = storage.values().map(|v| v.capacity()).sum();
+    let total_data: usize = storage.values().map(|e| e.size()).sum();
     let avg_data = total_data / storage.len();
-    let avg_capacity = total_capacity / storage.len();
 
     println!("  Stored {} devices (AHashMap capacity: {})", storage.len(), storage.capacity());
     println!("  Compressed data: {:.1} MB total, {} bytes avg per device", total_data as f64 / (1024.0 * 1024.0), avg_data);
-    println!("  Vec capacity: {:.1} MB total, {} bytes avg per device", total_capacity as f64 / (1024.0 * 1024.0), avg_capacity);
 
     (storage, total_data)
 }
 
-/// NibbleRun storage: FxHashMap<u32, Vec<u8>>
+/// NibbleRun storage: FxHashMap<u32, Encoder<i8, 300>>
 /// Returns the storage and compressed data size
-fn run_nibblerun_fxhash(readings: &[(u32, u32, i8)]) -> (FxHashMap<u32, Vec<u8>>, usize) {
-    let mut storage: FxHashMap<u32, Vec<u8>> = FxHashMap::default();
+fn run_nibblerun_fxhash(readings: &[(u32, u32, i8)]) -> (FxHashMap<u32, Encoder<i8, 300>>, usize) {
+    let mut storage: FxHashMap<u32, Encoder<i8, 300>> = FxHashMap::default();
     for &(device_id, ts, val) in readings {
-        if let Some(buf) = storage.get_mut(&device_id) {
-            let _ = nibblerun::appendable::append::<i8, 300>(buf, ts as u64, val);
-        } else {
-            let buf = nibblerun::appendable::create::<i8, 300>(ts as u64, val);
-            storage.insert(device_id, buf);
-        }
+        let encoder = storage.entry(device_id).or_insert_with(Encoder::new);
+        let _ = encoder.append(ts, val);
     }
 
-    // Calculate actual compressed data size and capacity
-    let total_data: usize = storage.values().map(|v| v.len()).sum();
-    let total_capacity: usize = storage.values().map(|v| v.capacity()).sum();
+    let total_data: usize = storage.values().map(|e| e.size()).sum();
     let avg_data = total_data / storage.len();
-    let avg_capacity = total_capacity / storage.len();
 
     println!("  Stored {} devices (FxHashMap capacity: {})", storage.len(), storage.capacity());
     println!("  Compressed data: {:.1} MB total, {} bytes avg per device", total_data as f64 / (1024.0 * 1024.0), avg_data);
-    println!("  Vec capacity: {:.1} MB total, {} bytes avg per device", total_capacity as f64 / (1024.0 * 1024.0), avg_capacity);
 
     (storage, total_data)
 }
 
-/// NibbleRun storage: BTreeMap<u32, Vec<u8>>
+/// NibbleRun storage: BTreeMap<u32, Encoder<i8, 300>>
 /// Returns the storage and compressed data size
-fn run_nibblerun_btreemap(readings: &[(u32, u32, i8)]) -> (BTreeMap<u32, Vec<u8>>, usize) {
-    let mut storage: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+fn run_nibblerun_btreemap(readings: &[(u32, u32, i8)]) -> (BTreeMap<u32, Encoder<i8, 300>>, usize) {
+    let mut storage: BTreeMap<u32, Encoder<i8, 300>> = BTreeMap::new();
     for &(device_id, ts, val) in readings {
-        if let Some(buf) = storage.get_mut(&device_id) {
-            let _ = nibblerun::appendable::append::<i8, 300>(buf, ts as u64, val);
-        } else {
-            let buf = nibblerun::appendable::create::<i8, 300>(ts as u64, val);
-            storage.insert(device_id, buf);
-        }
+        let encoder = storage.entry(device_id).or_insert_with(Encoder::new);
+        let _ = encoder.append(ts, val);
     }
 
-    // Calculate actual compressed data size and capacity
-    let total_data: usize = storage.values().map(|v| v.len()).sum();
-    let total_capacity: usize = storage.values().map(|v| v.capacity()).sum();
+    let total_data: usize = storage.values().map(|e| e.size()).sum();
     let avg_data = total_data / storage.len();
-    let avg_capacity = total_capacity / storage.len();
 
     println!("  Stored {} devices", storage.len());
     println!("  Compressed data: {:.1} MB total, {} bytes avg per device", total_data as f64 / (1024.0 * 1024.0), avg_data);
-    println!("  Vec capacity: {:.1} MB total, {} bytes avg per device", total_capacity as f64 / (1024.0 * 1024.0), avg_capacity);
 
     (storage, total_data)
 }
@@ -271,21 +241,17 @@ fn run_nibblerun_btreemap(readings: &[(u32, u32, i8)]) -> (BTreeMap<u32, Vec<u8>
 /// Encodes then freezes for compact read-only storage.
 /// Returns the storage and frozen data size
 fn run_nibblerun_frozen(readings: &[(u32, u32, i8)]) -> (AHashMap<u32, Vec<u8>>, usize) {
-    // First encode to appendable format
-    let mut temp_storage: AHashMap<u32, Vec<u8>> = AHashMap::new();
+    // First encode
+    let mut temp_storage: AHashMap<u32, Encoder<i8, 300>> = AHashMap::new();
     for &(device_id, ts, val) in readings {
-        if let Some(buf) = temp_storage.get_mut(&device_id) {
-            let _ = nibblerun::appendable::append::<i8, 300>(buf, ts as u64, val);
-        } else {
-            let buf = nibblerun::appendable::create::<i8, 300>(ts as u64, val);
-            temp_storage.insert(device_id, buf);
-        }
+        let encoder = temp_storage.entry(device_id).or_insert_with(Encoder::new);
+        let _ = encoder.append(ts, val);
     }
 
-    // Then freeze all buffers
+    // Then freeze all encoders
     let mut storage: AHashMap<u32, Vec<u8>> = AHashMap::new();
-    for (device_id, buf) in temp_storage {
-        let frozen = nibblerun::appendable::freeze::<i8, 300>(&buf);
+    for (device_id, encoder) in temp_storage {
+        let frozen = encoder.freeze();
         storage.insert(device_id, frozen);
     }
 
@@ -333,7 +299,7 @@ fn main() {
     let before = get_allocated();
     let start = Instant::now();
 
-    let (name, compressed_data): (&str, Option<usize>) = match args.benchmark {
+    match args.benchmark {
         BenchmarkType::Naive => {
             println!("Running naive benchmark...");
             let storage = run_naive(&interleaved);
@@ -342,7 +308,6 @@ fn main() {
             let allocated = after.saturating_sub(before);
             print_results("naive", expected_bytes, allocated, None, interleaved.len(), encode_duration);
             black_box(storage);
-            return;
         }
         BenchmarkType::NibblerunHashmap => {
             println!("Running nibblerun-hashmap benchmark...");
@@ -352,7 +317,6 @@ fn main() {
             let allocated = after.saturating_sub(before);
             print_results("nibblerun-hashmap", expected_bytes, allocated, Some(data_size), interleaved.len(), encode_duration);
             black_box(storage);
-            return;
         }
         BenchmarkType::NibblerunAhash => {
             println!("Running nibblerun-ahash benchmark...");
@@ -362,7 +326,6 @@ fn main() {
             let allocated = after.saturating_sub(before);
             print_results("nibblerun-ahash", expected_bytes, allocated, Some(data_size), interleaved.len(), encode_duration);
             black_box(storage);
-            return;
         }
         BenchmarkType::NibblerunFxhash => {
             println!("Running nibblerun-fxhash benchmark...");
@@ -372,7 +335,6 @@ fn main() {
             let allocated = after.saturating_sub(before);
             print_results("nibblerun-fxhash", expected_bytes, allocated, Some(data_size), interleaved.len(), encode_duration);
             black_box(storage);
-            return;
         }
         BenchmarkType::NibblerunBtreemap => {
             println!("Running nibblerun-btreemap benchmark...");
@@ -382,7 +344,6 @@ fn main() {
             let allocated = after.saturating_sub(before);
             print_results("nibblerun-btreemap", expected_bytes, allocated, Some(data_size), interleaved.len(), encode_duration);
             black_box(storage);
-            return;
         }
         BenchmarkType::NibblerunFrozen => {
             println!("Running nibblerun-frozen benchmark...");
@@ -392,7 +353,6 @@ fn main() {
             let allocated = after.saturating_sub(before);
             print_results("nibblerun-frozen", expected_bytes, allocated, Some(data_size), interleaved.len(), encode_duration);
             black_box(storage);
-            return;
         }
     };
 }

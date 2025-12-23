@@ -1,12 +1,566 @@
 //! Visualize nibblerun encoded data as interactive SVG.
 
 use clap::Parser;
-use nibblerun::appendable::{decode_with_spans, BitSpan, BitSpanKind, HEADER_SIZE};
 use nibblerun::constants::EPOCH_BASE;
-use nibblerun::{Encoder, Reading};
+use nibblerun::{Encoder, Reading, Value};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+
+// ============================================================================
+// Bit span types (for visualization)
+// ============================================================================
+
+/// Header size for i8 values
+const HEADER_SIZE: usize = header_size_for_value_bytes(1);
+
+/// Compute header size based on value byte size
+const fn header_size_for_value_bytes(value_bytes: usize) -> usize {
+    4 + 2 + 2 + value_bytes + value_bytes + value_bytes + 1 + 1 + 1
+}
+
+// Header field offsets
+const OFF_BASE_TS_OFFSET: usize = 0;
+const OFF_COUNT: usize = 4;
+const OFF_PREV_LOGICAL_IDX: usize = 6;
+const OFF_FIRST_VALUE: usize = 8;
+
+#[inline]
+const fn off_prev_value(value_bytes: usize) -> usize {
+    8 + value_bytes
+}
+
+#[inline]
+const fn off_current_value(value_bytes: usize) -> usize {
+    8 + 2 * value_bytes
+}
+
+#[inline]
+const fn off_zero_run(value_bytes: usize) -> usize {
+    8 + 3 * value_bytes
+}
+
+#[inline]
+const fn off_bit_count(value_bytes: usize) -> usize {
+    8 + 3 * value_bytes + 1
+}
+
+#[inline]
+const fn off_bit_accum(value_bytes: usize) -> usize {
+    8 + 3 * value_bytes + 2
+}
+
+/// Information about a span of bits in the encoded data (for visualization)
+#[derive(Debug, Clone)]
+struct BitSpan {
+    /// Unique identifier for this span
+    id: usize,
+    /// Starting bit position in the encoded data
+    start_bit: usize,
+    /// Number of bits in this span
+    length: usize,
+    /// What this span represents
+    kind: BitSpanKind,
+}
+
+/// The kind of data a bit span represents
+#[derive(Debug, Clone)]
+enum BitSpanKind {
+    /// Header: base timestamp (reconstructed)
+    HeaderBaseTs(u64),
+    /// Header: reading count
+    HeaderCount(u16),
+    /// Header: previous logical index
+    HeaderPrevLogicalIdx(u16),
+    /// Header: first value
+    HeaderFirstValue(i32),
+    /// Header: previous value (delta reference)
+    HeaderPrevValue(i32),
+    /// Header: current value (current interval)
+    HeaderCurrentValue(i32),
+    /// Header: zero run counter
+    HeaderZeroRun(u8),
+    /// Header: bit count
+    HeaderBitCount(u8),
+    /// Header: bit accumulator
+    HeaderBitAccum(u8),
+    /// Zero delta (unchanged value)
+    Zero,
+    /// Zero run 8-21 values
+    ZeroRun8_21(u32),
+    /// Zero run 22-149 values
+    ZeroRun22_149(u32),
+    /// Delta ±1
+    Delta1(i32),
+    /// Delta ±2
+    Delta2(i32),
+    /// Delta ±3 to ±10
+    Delta3_10(i32),
+    /// Large delta ±11 to ±1023
+    LargeDelta(i32),
+    /// Single-interval gap
+    SingleGap,
+    /// Multi-interval gap (2-65 intervals)
+    Gap(u32),
+}
+
+// Delta encoding table
+const DELTA_ENCODE: [(u32, u8); 21] = [
+    (0b1111110_0000, 11), // -10
+    (0b1111110_0001, 11), // -9
+    (0b1111110_0010, 11), // -8
+    (0b1111110_0011, 11), // -7
+    (0b1111110_0100, 11), // -6
+    (0b1111110_0101, 11), // -5
+    (0b1111110_0110, 11), // -4
+    (0b1111110_0111, 11), // -3
+    (0b11101, 5),         // -2
+    (0b101, 3),           // -1
+    (0, 0),               // 0 (unused)
+    (0b100, 3),           // +1
+    (0b11100, 5),         // +2
+    (0b1111110_1000, 11), // +3
+    (0b1111110_1001, 11), // +4
+    (0b1111110_1010, 11), // +5
+    (0b1111110_1011, 11), // +6
+    (0b1111110_1100, 11), // +7
+    (0b1111110_1101, 11), // +8
+    (0b1111110_1110, 11), // +9
+    (0b1111110_1111, 11), // +10
+];
+
+/// Encode a zero run, returning (bits, num_bits, consumed)
+#[inline]
+const fn encode_zero_run(n: u32) -> (u32, u32, u32) {
+    if n <= 7 {
+        (0, 1, 1)
+    } else if n <= 21 {
+        ((0b11110 << 4) | (n - 8), 9, n)
+    } else if n <= 149 {
+        ((0b11_1110 << 7) | (n - 22), 13, n)
+    } else {
+        ((0b11_1110 << 7) | 127, 13, 149)
+    }
+}
+
+/// Encode a delta value, returning (bits, num_bits)
+#[inline]
+fn encode_delta_value(delta: i32) -> (u32, u32) {
+    let idx = delta.wrapping_add(10) as usize;
+    if idx <= 20 {
+        let (bits, num_bits) = DELTA_ENCODE[idx];
+        if num_bits > 0 {
+            return (bits, u32::from(num_bits));
+        }
+    }
+    let clamped = delta.clamp(-1024, 1023);
+    let bits = (0b1111_1110_u32 << 11) | ((clamped as u32) & 0x7FF);
+    (bits, 19)
+}
+
+#[inline]
+fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([buf[offset], buf[offset + 1]])
+}
+
+#[inline]
+fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
+}
+
+/// BitReader with position tracking for span calculation
+struct BitReaderWithPos<'a> {
+    buf: &'a [u8],
+    byte_pos: usize,
+    bits: u64,
+    left: u32,
+}
+
+impl<'a> BitReaderWithPos<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        let mut r = BitReaderWithPos {
+            buf,
+            byte_pos: 0,
+            bits: 0,
+            left: 0,
+        };
+        r.refill();
+        r
+    }
+
+    fn refill(&mut self) {
+        while self.left <= 56 && self.byte_pos < self.buf.len() {
+            self.bits = (self.bits << 8) | u64::from(self.buf[self.byte_pos]);
+            self.byte_pos += 1;
+            self.left += 8;
+        }
+    }
+
+    fn read_bits(&mut self, n: u32) -> u32 {
+        if self.left < n {
+            self.refill();
+        }
+        if self.left < n {
+            return 0;
+        }
+        self.left -= n;
+        ((self.bits >> self.left) & ((1 << n) - 1)) as u32
+    }
+
+    fn bit_pos(&self) -> usize {
+        (self.byte_pos * 8).saturating_sub(self.left as usize)
+    }
+
+    const fn has_more(&self) -> bool {
+        self.left > 0 || self.byte_pos < self.buf.len()
+    }
+}
+
+/// Decode buffer to readings with bit span information for visualization.
+fn decode_with_spans<V: Value, const INTERVAL: u16>(
+    buf: &[u8],
+) -> (Vec<Reading<V>>, Vec<BitSpan>, Vec<BitSpan>) {
+    let header_size = header_size_for_value_bytes(V::BYTES);
+    let value_bits = V::BYTES * 8;
+    if buf.len() < header_size {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+
+    let mut header_spans = Vec::new();
+    let mut data_spans = Vec::new();
+    let mut span_id = 0;
+
+    // Parse header and create header spans
+    let base_ts_offset = read_u32_le(buf, OFF_BASE_TS_OFFSET);
+    let base_ts = EPOCH_BASE.wrapping_add(u64::from(base_ts_offset));
+    header_spans.push(BitSpan {
+        id: span_id,
+        start_bit: OFF_BASE_TS_OFFSET * 8,
+        length: 32,
+        kind: BitSpanKind::HeaderBaseTs(base_ts),
+    });
+    span_id += 1;
+
+    let count = read_u16_le(buf, OFF_COUNT) as usize;
+    header_spans.push(BitSpan {
+        id: span_id,
+        start_bit: OFF_COUNT * 8,
+        length: 16,
+        kind: BitSpanKind::HeaderCount(count as u16),
+    });
+    span_id += 1;
+
+    let prev_logical_idx = read_u16_le(buf, OFF_PREV_LOGICAL_IDX);
+    header_spans.push(BitSpan {
+        id: span_id,
+        start_bit: OFF_PREV_LOGICAL_IDX * 8,
+        length: 16,
+        kind: BitSpanKind::HeaderPrevLogicalIdx(prev_logical_idx),
+    });
+    span_id += 1;
+
+    let first_value = V::read_le(&buf[OFF_FIRST_VALUE..]).to_i32();
+    header_spans.push(BitSpan {
+        id: span_id,
+        start_bit: OFF_FIRST_VALUE * 8,
+        length: value_bits,
+        kind: BitSpanKind::HeaderFirstValue(first_value),
+    });
+    span_id += 1;
+
+    let prev_value = V::read_le(&buf[off_prev_value(V::BYTES)..]).to_i32();
+    header_spans.push(BitSpan {
+        id: span_id,
+        start_bit: off_prev_value(V::BYTES) * 8,
+        length: value_bits,
+        kind: BitSpanKind::HeaderPrevValue(prev_value),
+    });
+    span_id += 1;
+
+    let current_value = V::read_le(&buf[off_current_value(V::BYTES)..]).to_i32();
+    header_spans.push(BitSpan {
+        id: span_id,
+        start_bit: off_current_value(V::BYTES) * 8,
+        length: value_bits,
+        kind: BitSpanKind::HeaderCurrentValue(current_value),
+    });
+    span_id += 1;
+
+    let zero_run = buf[off_zero_run(V::BYTES)];
+    header_spans.push(BitSpan {
+        id: span_id,
+        start_bit: off_zero_run(V::BYTES) * 8,
+        length: 8,
+        kind: BitSpanKind::HeaderZeroRun(zero_run),
+    });
+    span_id += 1;
+
+    let bit_count = buf[off_bit_count(V::BYTES)];
+    header_spans.push(BitSpan {
+        id: span_id,
+        start_bit: off_bit_count(V::BYTES) * 8,
+        length: 8,
+        kind: BitSpanKind::HeaderBitCount(bit_count),
+    });
+    span_id += 1;
+
+    let bit_accum = u32::from(buf[off_bit_accum(V::BYTES)]);
+    header_spans.push(BitSpan {
+        id: span_id,
+        start_bit: off_bit_accum(V::BYTES) * 8,
+        length: 8,
+        kind: BitSpanKind::HeaderBitAccum(bit_accum as u8),
+    });
+    span_id += 1;
+
+    if count == 0 {
+        return (Vec::new(), header_spans, data_spans);
+    }
+
+    let first_val = if count == 1 {
+        V::from_i32(current_value)
+    } else {
+        V::from_i32(first_value)
+    };
+
+    let mut decoded = Vec::with_capacity(count);
+    decoded.push(Reading {
+        ts: base_ts as u32,
+        value: first_val,
+    });
+
+    if count == 1 {
+        return (decoded, header_spans, data_spans);
+    }
+
+    // Build finalized bit data
+    let data = &buf[header_size..];
+    let mut final_data = data.to_vec();
+    let mut accum = bit_accum;
+    let mut bits = u32::from(bit_count) & 7;
+    let mut run_zeros = u32::from(zero_run);
+
+    let flush_bytes = |accum: &mut u32, bits: &mut u32, out: &mut Vec<u8>| {
+        while *bits >= 8 {
+            *bits -= 8;
+            out.push((*accum >> *bits) as u8);
+        }
+    };
+
+    let delta = current_value.wrapping_sub(prev_value);
+    if delta == 0 {
+        run_zeros = run_zeros.saturating_add(1);
+    } else {
+        let max_iterations = 1000u32;
+        let mut iterations = 0u32;
+        while run_zeros > 0 && iterations < max_iterations {
+            let (b, n, c) = encode_zero_run(run_zeros);
+            accum = (accum << n) | b;
+            bits = bits.saturating_add(n);
+            run_zeros = run_zeros.saturating_sub(c);
+            flush_bytes(&mut accum, &mut bits, &mut final_data);
+            iterations += 1;
+        }
+        let (delta_bits, delta_num_bits) = encode_delta_value(delta);
+        accum = (accum << delta_num_bits) | delta_bits;
+        bits = bits.saturating_add(delta_num_bits);
+        flush_bytes(&mut accum, &mut bits, &mut final_data);
+    }
+
+    let max_iterations = 1000u32;
+    let mut iterations = 0u32;
+    while run_zeros > 0 && iterations < max_iterations {
+        let (b, n, c) = encode_zero_run(run_zeros);
+        accum = (accum << n) | b;
+        bits = bits.saturating_add(n);
+        run_zeros = run_zeros.saturating_sub(c);
+        flush_bytes(&mut accum, &mut bits, &mut final_data);
+        iterations += 1;
+    }
+
+    flush_bytes(&mut accum, &mut bits, &mut final_data);
+    if bits > 0 {
+        final_data.push((accum << (8 - bits)) as u8);
+    }
+
+    // Now decode with span tracking
+    let mut reader = BitReaderWithPos::new(&final_data);
+    let mut prev_val = first_value;
+    let mut idx = 1u64;
+    let interval = u64::from(INTERVAL);
+    let header_bits = header_size * 8;
+
+    while decoded.len() < count && reader.has_more() {
+        let start_bit = reader.bit_pos();
+
+        if reader.read_bits(1) == 0 {
+            data_spans.push(BitSpan {
+                id: span_id,
+                start_bit: header_bits + start_bit,
+                length: 1,
+                kind: BitSpanKind::Zero,
+            });
+            span_id += 1;
+            decoded.push(Reading {
+                ts: (base_ts + idx * interval) as u32,
+                value: V::from_i32(prev_val),
+            });
+            idx += 1;
+            continue;
+        }
+
+        if reader.read_bits(1) == 0 {
+            let sign = reader.read_bits(1);
+            let delta = if sign == 0 { 1 } else { -1 };
+            data_spans.push(BitSpan {
+                id: span_id,
+                start_bit: header_bits + start_bit,
+                length: 3,
+                kind: BitSpanKind::Delta1(delta),
+            });
+            span_id += 1;
+            prev_val = prev_val.wrapping_add(delta);
+            decoded.push(Reading {
+                ts: (base_ts + idx * interval) as u32,
+                value: V::from_i32(prev_val),
+            });
+            idx += 1;
+            continue;
+        }
+
+        if reader.read_bits(1) == 0 {
+            data_spans.push(BitSpan {
+                id: span_id,
+                start_bit: header_bits + start_bit,
+                length: 3,
+                kind: BitSpanKind::SingleGap,
+            });
+            span_id += 1;
+            idx += 1;
+            continue;
+        }
+
+        if reader.read_bits(1) == 0 {
+            let sign = reader.read_bits(1);
+            let delta = if sign == 0 { 2 } else { -2 };
+            data_spans.push(BitSpan {
+                id: span_id,
+                start_bit: header_bits + start_bit,
+                length: 5,
+                kind: BitSpanKind::Delta2(delta),
+            });
+            span_id += 1;
+            prev_val = prev_val.wrapping_add(delta);
+            decoded.push(Reading {
+                ts: (base_ts + idx * interval) as u32,
+                value: V::from_i32(prev_val),
+            });
+            idx += 1;
+            continue;
+        }
+
+        if reader.read_bits(1) == 0 {
+            let n = reader.read_bits(4) + 8;
+            data_spans.push(BitSpan {
+                id: span_id,
+                start_bit: header_bits + start_bit,
+                length: 9,
+                kind: BitSpanKind::ZeroRun8_21(n),
+            });
+            span_id += 1;
+            for _ in 0..n {
+                if decoded.len() >= count {
+                    break;
+                }
+                decoded.push(Reading {
+                    ts: (base_ts + idx * interval) as u32,
+                    value: V::from_i32(prev_val),
+                });
+                idx += 1;
+            }
+            continue;
+        }
+
+        if reader.read_bits(1) == 0 {
+            let n = reader.read_bits(7) + 22;
+            data_spans.push(BitSpan {
+                id: span_id,
+                start_bit: header_bits + start_bit,
+                length: 13,
+                kind: BitSpanKind::ZeroRun22_149(n),
+            });
+            span_id += 1;
+            for _ in 0..n {
+                if decoded.len() >= count {
+                    break;
+                }
+                decoded.push(Reading {
+                    ts: (base_ts + idx * interval) as u32,
+                    value: V::from_i32(prev_val),
+                });
+                idx += 1;
+            }
+            continue;
+        }
+
+        if reader.read_bits(1) == 0 {
+            let e = reader.read_bits(4) as i32;
+            let delta = if e < 8 { e - 10 } else { e - 5 };
+            data_spans.push(BitSpan {
+                id: span_id,
+                start_bit: header_bits + start_bit,
+                length: 11,
+                kind: BitSpanKind::Delta3_10(delta),
+            });
+            span_id += 1;
+            prev_val = prev_val.wrapping_add(delta);
+            decoded.push(Reading {
+                ts: (base_ts + idx * interval) as u32,
+                value: V::from_i32(prev_val),
+            });
+            idx += 1;
+            continue;
+        }
+
+        if reader.read_bits(1) == 0 {
+            let raw = reader.read_bits(11);
+            let delta = if raw & 0x400 != 0 {
+                (raw | 0xFFFF_F800) as i32
+            } else {
+                raw as i32
+            };
+            data_spans.push(BitSpan {
+                id: span_id,
+                start_bit: header_bits + start_bit,
+                length: 19,
+                kind: BitSpanKind::LargeDelta(delta),
+            });
+            span_id += 1;
+            prev_val = prev_val.wrapping_add(delta);
+            decoded.push(Reading {
+                ts: (base_ts + idx * interval) as u32,
+                value: V::from_i32(prev_val),
+            });
+            idx += 1;
+        } else {
+            let n = reader.read_bits(6) + 2;
+            data_spans.push(BitSpan {
+                id: span_id,
+                start_bit: header_bits + start_bit,
+                length: 14,
+                kind: BitSpanKind::Gap(n),
+            });
+            span_id += 1;
+            idx += u64::from(n);
+        }
+    }
+
+    (decoded, header_spans, data_spans)
+}
+
+// ============================================================================
+// Visualization code
+// ============================================================================
 
 /// Original reading from CSV for ground truth comparison
 #[derive(Debug, Clone)]
@@ -32,9 +586,9 @@ const GT_X: usize = 700;
 const GT_WIDTH: usize = 300;
 
 // Bitstream view constants
-const BITSTREAM_Y_OFFSET: usize = 40;   // Space above bitstream section
-const BITSTREAM_BIT_SIZE: usize = 12;   // Square bit size (width = height)
-const BITSTREAM_MAX_WIDTH: usize = 192; // 16 bits per row (16 * 12 = 192)
+const BITSTREAM_Y_OFFSET: usize = 40;
+const BITSTREAM_BIT_SIZE: usize = 12;
+const BITSTREAM_MAX_WIDTH: usize = 192;
 
 #[derive(Parser)]
 #[command(name = "nbl-viz")]
@@ -454,7 +1008,7 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
 }
 
 const fn is_leap_year(year: u32) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 fn get_bits_str(bytes: &[u8], start_bit: usize, length: usize) -> Vec<u8> {
@@ -499,7 +1053,7 @@ fn render_svg(
     interval: u16,
 ) -> String {
     let num_rows = rows.len();
-    let legend_height = 500;  // Increased for 8 header fields instead of 6
+    let legend_height = 500;
     let stats_height = if compression_stats.is_some() { 60 } else { 0 };
     let content_height = MARGIN * 2 + num_rows * ROW_HEIGHT + 40 + stats_height;
 
@@ -787,10 +1341,6 @@ fn render_legend(legend_x: usize) -> String {
     ));
     y += 16;
 
-    // Header layout for i8 value type (14 bytes):
-    // [0-3] base_ts_offset, [4-5] count, [6-7] prev_logical_idx,
-    // [8] first_value, [9] prev_value, [10] current_value,
-    // [11] zero_run, [12] bit_count, [13] bit_accum
     let header_fields = [
         ("base_ts_offset", "4 bytes", colors::HEADER),
         ("count", "2 bytes", colors::HEADER),
@@ -1031,8 +1581,9 @@ fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), Str
         let temp = temp_i32 as i8;
         original_readings.push(CsvReading { ts, value: temp });
 
+        let ts_u32: u32 = ts.try_into().map_err(|_| format!("Timestamp too large at line {line_num}"))?;
         encoder
-            .append(ts, temp)
+            .append(ts_u32, temp)
             .map_err(|e| format!("Encode error at line {line_num}: {e:?}"))?;
     }
 
@@ -1052,8 +1603,8 @@ fn parse_header_info(bytes: &[u8]) -> (u64, i32, u16) {
     // New header layout: base_ts_offset at offset 0
     let base_ts_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let base_ts = EPOCH_BASE + u64::from(base_ts_offset);
-    // first_value at offset 8
-    let first_value = i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    // first_value at offset 8 (for i8, it's just 1 byte but we read it properly)
+    let first_value = i32::from(bytes[8] as i8);
     // interval is no longer stored in header, use default
     (base_ts, first_value, DEFAULT_INTERVAL)
 }
@@ -1083,7 +1634,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Use the library's decode_with_spans function
+    // Use our local decode_with_spans function
     let (_readings, header_spans_raw, data_spans_raw): (Vec<Reading<i8>>, _, _) =
         decode_with_spans::<i8, DEFAULT_INTERVAL>(&bytes);
 

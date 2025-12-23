@@ -158,6 +158,8 @@ struct BenchResult {
 
 /// nibblerun appendable format
 fn bench_nibblerun_appendable(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
+    use nibblerun::Encoder;
+
     // Encode
     let start = Instant::now();
     let mut encoded: Vec<Vec<u8>> = Vec::with_capacity(data.len());
@@ -167,11 +169,11 @@ fn bench_nibblerun_appendable(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResul
             continue;
         }
         raw_sizes.push(readings.len() * 8); // (u32, i8) with padding = 8 bytes per reading
-        let mut buf = nibblerun::appendable::create::<i8, 300>(readings[0].0 as u64, readings[0].1);
-        for &(ts, val) in &readings[1..] {
-            let _ = nibblerun::appendable::append::<i8, 300>(&mut buf, ts as u64, val);
+        let mut encoder: Encoder<i8, 300> = Encoder::new();
+        for &(ts, val) in readings {
+            let _ = encoder.append(ts, val);
         }
-        encoded.push(buf);
+        encoded.push(encoder.to_bytes());
     }
     let encode_time = start.elapsed();
     black_box(&encoded);
@@ -181,7 +183,7 @@ fn bench_nibblerun_appendable(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResul
     // Decode
     let start = Instant::now();
     for buf in &encoded {
-        let decoded = nibblerun::appendable::decode::<i8, 300>(buf);
+        let decoded = nibblerun::decode_appendable::<i8, 300>(buf);
         black_box(decoded);
     }
     let decode_time = start.elapsed();
@@ -197,6 +199,8 @@ fn bench_nibblerun_appendable(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResul
 
 /// nibblerun frozen format
 fn bench_nibblerun_freeze(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
+    use nibblerun::Encoder;
+
     // Encode
     let start = Instant::now();
     let mut encoded: Vec<Vec<u8>> = Vec::with_capacity(data.len());
@@ -206,11 +210,11 @@ fn bench_nibblerun_freeze(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
             continue;
         }
         raw_sizes.push(readings.len() * 8);
-        let mut buf = nibblerun::appendable::create::<i8, 300>(readings[0].0 as u64, readings[0].1);
-        for &(ts, val) in &readings[1..] {
-            let _ = nibblerun::appendable::append::<i8, 300>(&mut buf, ts as u64, val);
+        let mut encoder: Encoder<i8, 300> = Encoder::new();
+        for &(ts, val) in readings {
+            let _ = encoder.append(ts, val);
         }
-        let frozen = nibblerun::appendable::freeze::<i8, 300>(&buf);
+        let frozen = encoder.freeze();
         encoded.push(frozen);
     }
     let encode_time = start.elapsed();
@@ -221,7 +225,7 @@ fn bench_nibblerun_freeze(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
     // Decode
     let start = Instant::now();
     for buf in &encoded {
-        let decoded = nibblerun::appendable::decode_frozen::<i8, 300>(buf);
+        let decoded = nibblerun::decode_frozen::<i8, 300>(buf);
         black_box(decoded);
     }
     let decode_time = start.elapsed();

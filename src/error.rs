@@ -6,10 +6,10 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppendError {
     /// Timestamp is before the base timestamp (first reading's timestamp)
-    TimestampBeforeBase { ts: u64, base_ts: u64 },
+    TimestampBeforeBase { ts: u32, base_ts: u32 },
     /// Timestamp would place reading in an earlier interval (out of order)
     OutOfOrder {
-        ts: u64,
+        ts: u32,
         logical_idx: u32,
         prev_logical_idx: u32,
     },
@@ -24,7 +24,7 @@ pub enum AppendError {
         new_value: i32,
     },
     /// Timestamp exceeds maximum time span (~227 days at 300s interval, ~45 days at 60s)
-    TimeSpanOverflow { ts: u64, base_ts: u64, max_intervals: u32 },
+    TimeSpanOverflow { ts: u32, base_ts: u32, max_intervals: u32 },
 }
 
 impl fmt::Display for AppendError {

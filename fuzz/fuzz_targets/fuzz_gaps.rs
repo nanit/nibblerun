@@ -11,10 +11,10 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let mut enc: Encoder<i32, INTERVAL> = Encoder::new();
-    let base_ts = 1_760_000_000u64;
+    let base_ts = 1_760_000_000u32;
 
     // Track which intervals have readings
-    let mut intervals_with_data: Vec<u64> = Vec::new();
+    let mut intervals_with_data: Vec<u32> = Vec::new();
     let mut prev_temp: Option<i32> = None;
 
     // Generate readings with gaps
@@ -25,9 +25,9 @@ fuzz_target!(|data: &[u8]| {
         }
 
         // Use 2 bytes for interval index to allow gaps
-        let interval_idx = u16::from_le_bytes([chunk[0], chunk[1]]) as u64;
+        let interval_idx = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
         let temp = chunk[2] as i8 as i32;
-        let ts = base_ts + interval_idx * u64::from(INTERVAL);
+        let ts = base_ts + interval_idx * u32::from(INTERVAL);
 
         // Check delta constraint
         if let Some(prev) = prev_temp {
@@ -55,7 +55,7 @@ fuzz_target!(|data: &[u8]| {
         for i in 0..decoded.len() - 1 {
             let ts_diff = decoded[i + 1].ts - decoded[i].ts;
             let expected_idx_diff = intervals_with_data[i + 1] - intervals_with_data[i];
-            let expected_ts_diff = expected_idx_diff * u64::from(INTERVAL);
+            let expected_ts_diff = expected_idx_diff * u32::from(INTERVAL);
 
             assert_eq!(
                 ts_diff, expected_ts_diff,

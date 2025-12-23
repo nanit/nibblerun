@@ -35,22 +35,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_lossy_bounds"
-path = "fuzz_targets/fuzz_lossy_bounds.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "fuzz_single_reading"
-path = "fuzz_targets/fuzz_single_reading.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "fuzz_averaging"
-path = "fuzz_targets/fuzz_averaging.rs"
+name = "fuzz_keep_last"
+path = "fuzz_targets/fuzz_keep_last.rs"
 test = false
 doc = false
 bench = false

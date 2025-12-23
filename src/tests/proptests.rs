@@ -1,8 +1,8 @@
-use crate::{decode, Encoder};
+use crate::Encoder;
 use proptest::prelude::*;
 
-// Start well after EPOCH_BASE to ensure negative jitter doesn't underflow
-const BASE_TS: u64 = 1_760_100_000;
+// Base timestamp (any value works with u32)
+const BASE_TS: u32 = 1_760_100_000;
 
 /// Generate tests for a specific interval using a macro
 macro_rules! proptest_interval {
@@ -16,13 +16,13 @@ macro_rules! proptest_interval {
                 fn arb_readings()(
                     count in 0usize..500,
                 )(
-                    jitters in prop::collection::vec(-($interval as i64 / 10)..=($interval as i64 / 10), count),
+                    jitters in prop::collection::vec(-($interval as i32 / 10)..=($interval as i32 / 10), count),
                     temps in prop::collection::vec(-100i32..140, count),
-                ) -> Vec<(u64, i32)> {
+                ) -> Vec<(u32, i32)> {
                     jitters.iter().zip(temps.iter()).enumerate()
                         .map(|(i, (&jitter, &temp))| {
-                            let nominal_ts = BASE_TS + (i as u64) * ($interval as u64);
-                            let jittered_ts = (nominal_ts as i64 + jitter).max(0) as u64;
+                            let nominal_ts = BASE_TS + (i as u32) * ($interval as u32);
+                            let jittered_ts = (nominal_ts as i32 + jitter).max(0) as u32;
                             (jittered_ts, temp)
                         })
                         .collect()
@@ -54,13 +54,14 @@ macro_rules! proptest_interval {
                 /// Property: encode then decode via bytes equals direct decode
                 #[test]
                 fn prop_roundtrip_via_bytes(readings in arb_readings()) {
+                    use crate::decode_appendable;
                     let mut enc = Encoder::<i32, $interval>::new();
                     for (ts, temp) in readings {
                         enc.append(ts, temp).unwrap();
                     }
 
                     let direct = enc.decode();
-                    let via_bytes = decode::<i32, $interval>(&enc.to_bytes());
+                    let via_bytes = decode_appendable::<i32, $interval>(&enc.to_bytes());
 
                     prop_assert_eq!(direct.len(), via_bytes.len());
                     for (d, b) in direct.iter().zip(via_bytes.iter()) {
@@ -110,7 +111,7 @@ macro_rules! proptest_interval {
                         let base = first.ts;
                         for reading in &decoded {
                             let offset = reading.ts - base;
-                            prop_assert_eq!(offset % ($interval as u64), 0,
+                            prop_assert_eq!(offset % ($interval as u32), 0,
                                 "Timestamp {} not aligned to interval {} from base {}",
                                 reading.ts, $interval, base);
                         }
@@ -136,14 +137,14 @@ macro_rules! proptest_interval {
 
                     // Group input readings by their quantized interval
                     let base_ts = readings[0].0;
-                    let mut intervals: std::collections::BTreeMap<u64, Vec<i32>> = std::collections::BTreeMap::new();
-                    let mut prev_idx = 0u64;
+                    let mut intervals: std::collections::BTreeMap<u32, Vec<i32>> = std::collections::BTreeMap::new();
+                    let mut prev_idx = 0u32;
 
                     for &(ts, temp) in &readings {
                         if ts < base_ts {
                             continue;
                         }
-                        let idx = (ts - base_ts) / ($interval as u64);
+                        let idx = (ts - base_ts) / ($interval as u32);
                         if intervals.is_empty() || idx >= prev_idx {
                             intervals.entry(idx).or_default().push(temp);
                             if idx > prev_idx || intervals.len() == 1 {
@@ -153,7 +154,7 @@ macro_rules! proptest_interval {
                     }
 
                     for reading in &decoded {
-                        let idx = (reading.ts - base_ts) / ($interval as u64);
+                        let idx = (reading.ts - base_ts) / ($interval as u32);
 
                         if let Some(temps) = intervals.get(&idx) {
                             let min_temp = *temps.iter().min().unwrap();
@@ -174,7 +175,7 @@ macro_rules! proptest_interval {
                     let mut enc = Encoder::<i32, $interval>::new();
 
                     for (i, &temp) in temps.iter().enumerate() {
-                        let ts = BASE_TS + (i as u64) * ($interval as u64);
+                        let ts = BASE_TS + (i as u32) * ($interval as u32);
                         enc.append(ts, temp).unwrap();
                     }
 
@@ -200,9 +201,9 @@ macro_rules! proptest_interval {
                     let mut enc = Encoder::<i32, $interval>::new();
 
                     for (interval_idx, temps) in interval_temps.iter().enumerate() {
-                        let interval_start = BASE_TS + (interval_idx as u64) * ($interval as u64);
+                        let interval_start = BASE_TS + (interval_idx as u32) * ($interval as u32);
                         for (j, &temp) in temps.iter().enumerate() {
-                            let offset = (j as u64) % ($interval as u64);
+                            let offset = (j as u32) % ($interval as u32);
                             enc.append(interval_start + offset, temp).unwrap();
                         }
                     }
@@ -230,11 +231,11 @@ macro_rules! proptest_interval {
                     let mut expected_intervals = Vec::new();
 
                     for (interval_idx, &count) in readings_per_interval.iter().enumerate() {
-                        let interval_start = BASE_TS + (interval_idx as u64) * ($interval as u64);
+                        let interval_start = BASE_TS + (interval_idx as u32) * ($interval as u32);
                         expected_intervals.push(interval_start);
 
                         for j in 0..count {
-                            let jitter = (j as u64 * 17) % ($interval as u64);
+                            let jitter = (j as u32 * 17) % ($interval as u32);
                             enc.append(interval_start + jitter, 22).unwrap();
                         }
                     }
@@ -252,13 +253,13 @@ macro_rules! proptest_interval {
                 /// Property: gaps in input timestamps are preserved in output
                 #[test]
                 fn prop_gap_preservation(
-                    interval_indices in prop::collection::btree_set(0u64..100, 1..30),
+                    interval_indices in prop::collection::btree_set(0u32..100, 1..30),
                 ) {
                     let mut enc = Encoder::<i32, $interval>::new();
-                    let indices: Vec<u64> = interval_indices.into_iter().collect();
+                    let indices: Vec<u32> = interval_indices.into_iter().collect();
 
                     for &idx in &indices {
-                        let ts = BASE_TS + idx * ($interval as u64);
+                        let ts = BASE_TS + idx * ($interval as u32);
                         enc.append(ts, 22).unwrap();
                     }
 
@@ -267,17 +268,17 @@ macro_rules! proptest_interval {
                         "Expected {} readings, got {}", indices.len(), decoded.len());
 
                     for (reading, &expected_idx) in decoded.iter().zip(indices.iter()) {
-                        let expected_ts = BASE_TS + expected_idx * ($interval as u64);
+                        let expected_ts = BASE_TS + expected_idx * ($interval as u32);
                         prop_assert_eq!(reading.ts, expected_ts,
                             "Expected timestamp {} (interval {}), got {} (interval {})",
                             expected_ts, expected_idx, reading.ts,
-                            (reading.ts - BASE_TS) / ($interval as u64));
+                            (reading.ts - BASE_TS) / ($interval as u32));
                     }
 
                     for (i, window) in decoded.windows(2).enumerate() {
                         let ts_diff = window[1].ts - window[0].ts;
                         let idx_diff = indices[i + 1] - indices[i];
-                        let expected_diff = idx_diff * ($interval as u64);
+                        let expected_diff = idx_diff * ($interval as u32);
 
                         prop_assert_eq!(ts_diff, expected_diff,
                             "Gap between readings {} and {}: expected {} seconds ({} intervals), got {} seconds",
@@ -288,7 +289,7 @@ macro_rules! proptest_interval {
                 /// Property: decoded count equals number of unique intervals in input
                 #[test]
                 fn prop_interval_deduplication(
-                    timestamps in prop::collection::vec(0u64..10000, 1..100),
+                    timestamps in prop::collection::vec(0u32..10000, 1..100),
                 ) {
                     if timestamps.is_empty() {
                         return Ok(());
@@ -307,10 +308,10 @@ macro_rules! proptest_interval {
 
                     let base_offset = sorted_timestamps[0];
                     let mut unique_intervals = std::collections::BTreeSet::new();
-                    let mut prev_idx: Option<u64> = None;
+                    let mut prev_idx: Option<u32> = None;
 
                     for &ts_offset in &sorted_timestamps {
-                        let idx = (ts_offset - base_offset) / ($interval as u64);
+                        let idx = (ts_offset - base_offset) / ($interval as u32);
                         if prev_idx.is_none() || idx > prev_idx.unwrap() {
                             unique_intervals.insert(idx);
                             prev_idx = Some(idx);
@@ -325,19 +326,19 @@ macro_rules! proptest_interval {
                 /// Property: with gaps and one reading per interval, values are preserved exactly
                 #[test]
                 fn prop_lossless_with_gaps(
-                    interval_indices in prop::collection::btree_set(0u64..100, 1..30),
+                    interval_indices in prop::collection::btree_set(0u32..100, 1..30),
                     temps in prop::collection::vec(-100i32..140, 30),
                 ) {
-                    let indices: Vec<u64> = interval_indices.into_iter().collect();
+                    let indices: Vec<u32> = interval_indices.into_iter().collect();
                     if indices.is_empty() {
                         return Ok(());
                     }
 
                     let mut enc = Encoder::<i32, $interval>::new();
-                    let mut expected: Vec<(u64, i32)> = Vec::new();
+                    let mut expected: Vec<(u32, i32)> = Vec::new();
 
                     for (i, &idx) in indices.iter().enumerate() {
-                        let ts = BASE_TS + idx * ($interval as u64);
+                        let ts = BASE_TS + idx * ($interval as u32);
                         let temp = temps[i % temps.len()];
                         if enc.append(ts, temp).is_ok() {
                             expected.push((ts, temp));

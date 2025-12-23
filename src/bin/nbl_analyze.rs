@@ -1258,7 +1258,7 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
     };
 
     // Collect readings for actual compression
-    let mut readings: Vec<(u64, i32)> = Vec::new();
+    let mut readings: Vec<(u32, i32)> = Vec::new();
 
     let mut prev_temp: Option<i32> = None;
     let mut prev_ts: Option<u64> = None;
@@ -1275,7 +1275,7 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
             continue;
         }
 
-        let ts: u64 = match parts[0].trim().parse() {
+        let ts: u32 = match parts[0].trim().parse() {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -1296,7 +1296,7 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
             *stats.gap_counts.entry(1).or_insert(0) += 1;
             // Don't reset prev_temp - the gap is between readings
             // but do update prev_ts to track consecutive gaps
-            prev_ts = Some(ts);
+            prev_ts = Some(ts as u64);
             continue;
         }
 
@@ -1328,7 +1328,7 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
 
         // Check for timestamp gaps (assuming ~300 second intervals)
         if let Some(pt) = prev_ts {
-            let ts_diff = ts.saturating_sub(pt);
+            let ts_diff = (ts as u64).saturating_sub(pt);
             if ts_diff > 350 {
                 // More than one interval (with some slack)
                 let gap_intervals = (ts_diff / 300).saturating_sub(1) as u32;
@@ -1339,7 +1339,7 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
         }
 
         prev_temp = Some(temp);
-        prev_ts = Some(ts);
+        prev_ts = Some(ts as u64);
     }
 
     // Flush remaining zero run

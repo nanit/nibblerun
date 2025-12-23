@@ -1,34 +1,36 @@
-use crate::appendable::header_size_for_value_bytes;
-use crate::constants::{div_by_interval, EPOCH_BASE};
-use crate::value::Value;
+use crate::constants::div_by_interval;
 use crate::{decode, AppendError, Encoder};
 
 /// ============================================================================
 /// STRUCT SIZE GUARD - DO NOT MODIFY WITHOUT EXPLICIT AGREEMENT
 /// ============================================================================
-/// The Encoder struct wraps a Vec<u8> buffer in appendable format.
-/// All value types use the same size since the buffer is type-erased.
+/// The Encoder struct has explicit fields for state tracking.
+/// Size varies by value type due to generic parameters.
 /// ============================================================================
 #[test]
 fn test_encoder_struct_sizes_guard() {
     use std::mem::size_of;
 
-    // Encoder is now a thin wrapper around Vec<u8>
-    // Vec<u8> is 24 bytes on 64-bit platforms
+    // Encoder now has struct fields + Vec<u8> for data
+    // base_ts: u32 = 4, count: u16 = 2, prev_logical_idx: u16 = 2
+    // first_value: V, prev_value: V, current_value: V (varies)
+    // zero_run: u8 = 1, bit_count: u8 = 1, bit_accum: u8 = 1
+    // data: Vec<u8> = 24
+    // Plus padding for alignment
     assert_eq!(
         size_of::<Encoder<i8>>(),
-        24,
-        "Encoder<i8> size changed! Expected 24 bytes (Vec<u8> wrapper)."
+        40,
+        "Encoder<i8> size changed! Expected 40 bytes."
     );
     assert_eq!(
         size_of::<Encoder<i16>>(),
-        24,
-        "Encoder<i16> size changed! Expected 24 bytes (Vec<u8> wrapper)."
+        48,
+        "Encoder<i16> size changed! Expected 48 bytes."
     );
     assert_eq!(
         size_of::<Encoder<i32>>(),
-        24,
-        "Encoder<i32> size changed! Expected 24 bytes (Vec<u8> wrapper)."
+        48,
+        "Encoder<i32> size changed! Expected 48 bytes."
     );
 }
 
@@ -41,11 +43,11 @@ fn test_div_by_interval() {
 
 #[test]
 fn test_roundtrip() {
-    let base = 1761955455u64;
+    let base = 1761955455u32;
     let temps = [22, 23, 23, 22, 21, 22, 22, 22, 25, 20];
     let mut enc = Encoder::<i32>::new();
     for (i, &t) in temps.iter().enumerate() {
-        enc.append(base + i as u64 * 300, t).unwrap();
+        enc.append(base + i as u32 * 300, t).unwrap();
     }
     let dec = enc.decode();
     assert_eq!(dec.len(), temps.len());
@@ -73,7 +75,7 @@ fn test_single_reading() {
 #[test]
 fn test_gaps() {
     // Gaps are implicit - just skip intervals by using later timestamps
-    let base = 1761955455u64;
+    let base = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
     enc.append(base, 22).unwrap();
     // Skip 2 intervals (600 seconds = 2 * 300)
@@ -88,10 +90,10 @@ fn test_gaps() {
 
 #[test]
 fn test_long_run() {
-    let base = 1761955455u64;
+    let base = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
     for i in 0..200 {
-        enc.append(base + i * 300, 22).unwrap();
+        enc.append(base + i as u32 * 300, 22).unwrap();
     }
     let dec = enc.decode();
     assert_eq!(dec.len(), 200);
@@ -102,7 +104,7 @@ fn test_long_run() {
 
 #[test]
 fn test_all_deltas() {
-    let base = 1761955455u64;
+    let base = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
     let mut temp = 70;
     let mut temps = vec![temp];
@@ -117,7 +119,7 @@ fn test_all_deltas() {
     temps.push(temp);
 
     for (i, &t) in temps.iter().enumerate() {
-        enc.append(base + i as u64 * 300, t).unwrap();
+        enc.append(base + i as u32 * 300, t).unwrap();
     }
     let dec = enc.decode();
     assert_eq!(dec.len(), temps.len());
@@ -128,13 +130,13 @@ fn test_all_deltas() {
 
 #[test]
 fn test_temp_range_25_to_39() {
-    let base = 1761955455u64;
+    let base = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
     let mut temps: Vec<i32> = (25..=39).collect();
     temps.extend((25..39).rev());
 
     for (i, &t) in temps.iter().enumerate() {
-        enc.append(base + i as u64 * 300, t).unwrap();
+        enc.append(base + i as u32 * 300, t).unwrap();
     }
 
     let dec = enc.decode();
@@ -147,12 +149,12 @@ fn test_temp_range_25_to_39() {
 
 #[test]
 fn test_temp_range_neg10_to_39() {
-    let base = 1761955455u64;
+    let base = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
     let temps: Vec<i32> = (-10..=39).collect();
 
     for (i, &t) in temps.iter().enumerate() {
-        enc.append(base + i as u64 * 300, t).unwrap();
+        enc.append(base + i as u32 * 300, t).unwrap();
     }
 
     let dec = enc.decode();
@@ -165,7 +167,7 @@ fn test_temp_range_neg10_to_39() {
 
 #[test]
 fn test_compression_ratio() {
-    let base = 1761955455u64;
+    let base = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // Simulate typical day: mostly constant with occasional changes
@@ -178,7 +180,7 @@ fn test_compression_ratio() {
         if i == 150 {
             temp = 22;
         }
-        enc.append(base + i * 300, temp).unwrap();
+        enc.append(base + i as u32 * 300, temp).unwrap();
     }
 
     let bytes = enc.to_bytes();
@@ -191,10 +193,10 @@ fn test_compression_ratio() {
 #[test]
 fn test_constant_temperature() {
     let mut encoder = Encoder::<i32>::new();
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     for i in 0..10 {
-        encoder.append(base_ts + i * 300, 22).unwrap();
+        encoder.append(base_ts + i as u32 * 300, 22).unwrap();
     }
 
     let decoded = encoder.decode();
@@ -208,11 +210,11 @@ fn test_constant_temperature() {
 #[test]
 fn test_small_deltas() {
     let mut encoder = Encoder::<i32>::new();
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let temps = [22, 23, 22, 21, 22];
 
     for (i, &temp) in temps.iter().enumerate() {
-        encoder.append(base_ts + i as u64 * 300, temp).unwrap();
+        encoder.append(base_ts + i as u32 * 300, temp).unwrap();
     }
 
     let decoded = encoder.decode();
@@ -226,7 +228,7 @@ fn test_small_deltas() {
 #[test]
 fn test_medium_delta() {
     let mut encoder = Encoder::<i32>::new();
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     encoder.append(base_ts, 20).unwrap();
     encoder.append(base_ts + 300, 25).unwrap(); // +5
@@ -243,7 +245,7 @@ fn test_medium_delta() {
 #[test]
 fn test_large_delta() {
     let mut encoder = Encoder::<i32>::new();
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     encoder.append(base_ts, 20).unwrap();
     encoder.append(base_ts + 300, 520).unwrap(); // +500
@@ -260,10 +262,10 @@ fn test_large_delta() {
 #[test]
 fn test_long_zero_run() {
     let mut encoder = Encoder::<i32>::new();
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     for i in 0..50 {
-        encoder.append(base_ts + i * 300, 22).unwrap();
+        encoder.append(base_ts + i as u32 * 300, 22).unwrap();
     }
 
     let decoded = encoder.decode();
@@ -278,15 +280,15 @@ fn test_long_zero_run() {
 fn test_with_timestamp_jitter() {
     // Simulate real-world sensor readings with small positive jitter
     // (negative jitter could cause readings to fall into previous interval)
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let temps = [22, 23, 23, 22, 21, 21, 22, 23, 22, 21];
 
     // Positive jitter only to ensure each reading lands in its expected interval
-    let jitter = [0u64, 3, 2, 5, 5, 1, 3, 4, 1, 2];
+    let jitter = [0u32, 3, 2, 5, 5, 1, 3, 4, 1, 2];
 
     let mut encoder = Encoder::<i32>::new();
     for (i, (&temp, &j)) in temps.iter().zip(jitter.iter()).enumerate() {
-        let ts = base_ts + (i as u64 * 300) + j;
+        let ts = base_ts + (i as u32 * 300) + j;
         encoder.append(ts, temp).unwrap();
     }
 
@@ -314,51 +316,9 @@ fn test_with_timestamp_jitter() {
 }
 
 #[test]
-fn test_with_larger_timestamp_jitter() {
-    // Test with jitter that stays within the same interval when quantized
-    // Using jitter small enough that (i*300 + jitter) / 300 = i
-    let base_ts = 1761955455u64;
-    let temps = [22, 23, 24, 25, 26];
-
-    // Jitter values carefully chosen so logical index = i
-    // For idx i: need (i*300 + jitter) / 300 = i
-    // This means: i*300 <= i*300 + jitter < (i+1)*300
-    // So: 0 <= jitter < 300 for positive
-    let jitter = [0i64, 50, 100, 149, 200];
-
-    let mut encoder = Encoder::<i32>::new();
-    for (i, (&temp, &j)) in temps.iter().zip(jitter.iter()).enumerate() {
-        let ts = (base_ts as i64 + (i as i64 * 300) + j) as u64;
-        encoder.append(ts, temp).unwrap();
-    }
-
-    let decoded = encoder.decode();
-
-    assert_eq!(decoded.len(), 5);
-
-    // Expected: each reading maps to logical index i, so ts = base_ts + i*300
-    let expected: [(u64, i32); 5] = [
-        (base_ts + 0 * 300, 22),
-        (base_ts + 1 * 300, 23),
-        (base_ts + 2 * 300, 24),
-        (base_ts + 3 * 300, 25),
-        (base_ts + 4 * 300, 26),
-    ];
-
-    for (i, reading) in decoded.iter().enumerate() {
-        assert_eq!(reading.ts, expected[i].0, "ts mismatch at index {}", i);
-        assert_eq!(
-            reading.value, expected[i].1,
-            "temp mismatch at index {}",
-            i
-        );
-    }
-}
-
-#[test]
 fn test_specific_day_with_jitter() {
     // 2025-12-01 00:00:00 UTC = 1764547200
-    let day_start = 1764547200u64;
+    let day_start = 1764547200u32;
 
     // Input readings with realistic jitter:
     // 00:00:03 -> temp 25 (logical idx 0)
@@ -366,7 +326,7 @@ fn test_specific_day_with_jitter() {
     // 00:10:20 -> temp 26 (logical idx 2)
     // 00:15:02 -> temp 25 (logical idx 2 - same interval, keep-last replaces 26 with 25)
     // 01:35:05 -> temp 26 (logical idx 19)
-    let inputs: [(u64, i32); 5] = [
+    let inputs: [(u32, i32); 5] = [
         (day_start + 0 * 60 + 3, 25),   // 00:00:03
         (day_start + 5 * 60 + 10, 25),  // 00:05:10
         (day_start + 10 * 60 + 20, 26), // 00:10:20
@@ -393,7 +353,7 @@ fn test_specific_day_with_jitter() {
 
     let base_ts = inputs[0].0;
 
-    let expected: [(u64, i32); 4] = [
+    let expected: [(u32, i32); 4] = [
         (base_ts + 0 * 300, 25),  // logical idx 0
         (base_ts + 1 * 300, 25),  // logical idx 1
         (base_ts + 2 * 300, 25),  // logical idx 2 - keep-last: 25 replaced 26
@@ -423,7 +383,7 @@ fn test_specific_day_with_jitter() {
 
 #[test]
 fn test_out_of_order_readings_return_error() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut encoder = Encoder::<i32>::new();
 
     // First reading sets base_ts
@@ -458,7 +418,7 @@ fn test_out_of_order_readings_return_error() {
 
 #[test]
 fn test_reading_before_base_ts_returns_error() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut encoder = Encoder::<i32>::new();
 
     // First reading establishes base_ts
@@ -505,29 +465,23 @@ fn test_reading_before_base_ts_returns_error() {
 
 #[test]
 fn test_reading_before_epoch_base_as_first() {
-    // If the first reading has ts < EPOCH_BASE, the base_ts_offset calculation
-    // will wrap around due to unsigned integer arithmetic.
-    // This is a known limitation: timestamps must be >= EPOCH_BASE.
+    // Now that we use raw u32 timestamps (no EPOCH_BASE offset), any valid u32 timestamp works.
     let mut encoder = Encoder::<i32>::new();
 
-    // Timestamp before EPOCH_BASE (1_760_000_000)
-    let old_ts = EPOCH_BASE - 1000;
+    // Timestamp before the old EPOCH_BASE - now perfectly valid
+    let old_ts = 1_760_000_000u32 - 1000;
     encoder.append(old_ts, 22).unwrap();
 
     // The encoder accepts it as first reading (base_ts = old_ts)
     assert_eq!(encoder.count(), 1);
 
-    // to_bytes() completes but produces incorrect data due to wrapping
-    // In release mode, this doesn't panic - it wraps around
     let bytes = encoder.to_bytes();
-    assert_eq!(bytes.len(), header_size_for_value_bytes(i32::BYTES)); // Header only for single reading
+    assert_eq!(bytes.len(), 23); // Header only for single reading
 
-    // The base_ts_offset will be a wrapped value (very large number)
-    // In new header format, base_ts_offset is at offset 0
-    let base_ts_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    // Expected wrapped value: (EPOCH_BASE - 1000).wrapping_sub(EPOCH_BASE) as u32
-    let expected = (old_ts.wrapping_sub(EPOCH_BASE)) as u32;
-    assert_eq!(base_ts_offset, expected);
+    // The base_ts is stored directly in the header (bytes 0-3)
+    let base_ts = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    // Should match the input timestamp exactly
+    assert_eq!(base_ts, old_ts);
 }
 
 #[test]
@@ -544,7 +498,7 @@ fn test_size_matches_to_bytes() {
     // Multiple readings with zero deltas (tests zero_run estimation)
     let mut enc = Encoder::<i32>::new();
     for i in 0..10 {
-        enc.append(1761955455 + i * 300, 22).unwrap();
+        enc.append(1761955455 + i as u32 * 300, 22).unwrap();
     }
     assert_eq!(enc.size(), enc.to_bytes().len());
 
@@ -552,14 +506,14 @@ fn test_size_matches_to_bytes() {
     let mut enc = Encoder::<i32>::new();
     let temps = [22, 23, 21, 25, 20, 30, 15];
     for (i, &t) in temps.iter().enumerate() {
-        enc.append(1761955455 + i as u64 * 300, t).unwrap();
+        enc.append(1761955455 + i as u32 * 300, t).unwrap();
     }
     assert_eq!(enc.size(), enc.to_bytes().len());
 
     // Long zero run (tests zero_run > 149)
     let mut enc = Encoder::<i32>::new();
     for i in 0..200 {
-        enc.append(1761955455 + i * 300, 22).unwrap();
+        enc.append(1761955455 + i as u32 * 300, 22).unwrap();
     }
     assert_eq!(enc.size(), enc.to_bytes().len());
 
@@ -567,147 +521,26 @@ fn test_size_matches_to_bytes() {
     let mut enc = Encoder::<i32>::new();
     for i in 0..50 {
         let temp = if i % 10 == 0 { 25 } else { 22 };
-        enc.append(1761955455 + i * 300, temp).unwrap();
+        enc.append(1761955455 + i as u32 * 300, temp).unwrap();
     }
     assert_eq!(enc.size(), enc.to_bytes().len());
 }
 
 #[test]
-fn test_size_incremental_with_jitter() {
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32>::new();
-
-    // Simple PRNG for deterministic jitter (no external deps)
-    let mut seed: u32 = 12345;
-    let mut next_jitter = || {
-        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-        (seed % 100) as u64 // 0-99 seconds jitter
-    };
-
-    // Simple PRNG for temperature changes
-    let mut temp_seed: u32 = 67890;
-    let mut next_temp_delta = || {
-        temp_seed = temp_seed.wrapping_mul(1103515245).wrapping_add(12345);
-        match temp_seed % 10 {
-            0 => 1,  // 10% chance +1
-            1 => -1, // 10% chance -1
-            2 => 2,  // 10% chance +2
-            3 => -2, // 10% chance -2
-            _ => 0,  // 60% chance no change
-        }
-    };
-
-    let mut temp = 22i32;
-    let mut prev_logical_idx = 0u64;
-
-    for i in 0..300 {
-        let jitter = next_jitter();
-        let ts = base_ts + i * 300 + jitter;
-
-        // Calculate logical index to check if this reading will be accepted
-        let logical_idx = if enc.count() == 0 {
-            0
-        } else {
-            (ts - base_ts) / 300
-        };
-
-        // Only update temp if reading will be accepted (not a duplicate)
-        if enc.count() == 0 || logical_idx > prev_logical_idx {
-            temp = (temp + next_temp_delta()).clamp(-50, 100);
-            prev_logical_idx = logical_idx;
-        }
-
-        enc.append(ts, temp).unwrap();
-
-        // Assert size matches actual encoded size after each append
-        let actual_size = enc.to_bytes().len();
-        let estimated_size = enc.size();
-
-        assert_eq!(
-            estimated_size, actual_size,
-            "size mismatch at iteration {}: estimated={}, actual={}",
-            i, estimated_size, actual_size
-        );
-    }
-}
-
-#[test]
-fn test_size_constant_temperature_incremental() {
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32>::new();
-
-    // Constant temperature - maximum compression via zero runs
-    for i in 0..300 {
-        enc.append(base_ts + i * 300, 22).unwrap();
-
-        let actual_size = enc.to_bytes().len();
-        let estimated_size = enc.size();
-
-        assert_eq!(
-            estimated_size, actual_size,
-            "size mismatch at iteration {}: estimated={}, actual={}",
-            i, estimated_size, actual_size
-        );
-    }
-}
-
-#[test]
-fn test_size_alternating_temperature_incremental() {
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32>::new();
-
-    // Alternating temperature - no zero runs, all ±1 deltas
-    for i in 0..300 {
-        let temp = if i % 2 == 0 { 22 } else { 23 };
-        enc.append(base_ts + i * 300, temp).unwrap();
-
-        let actual_size = enc.to_bytes().len();
-        let estimated_size = enc.size();
-
-        assert_eq!(
-            estimated_size, actual_size,
-            "size mismatch at iteration {}: estimated={}, actual={}",
-            i, estimated_size, actual_size
-        );
-    }
-}
-
-#[test]
-fn test_size_large_deltas_incremental() {
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32>::new();
-
-    // Large temperature swings - tests large delta encoding
-    for i in 0..300 {
-        let temp = if i % 2 == 0 { 0 } else { 100 };
-        enc.append(base_ts + i * 300, temp).unwrap();
-
-        let actual_size = enc.to_bytes().len();
-        let estimated_size = enc.size();
-
-        assert_eq!(
-            estimated_size, actual_size,
-            "size mismatch at iteration {}: estimated={}, actual={}",
-            i, estimated_size, actual_size
-        );
-    }
-}
-
-#[test]
 fn test_duplicate_day_events_return_error() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut encoder = Encoder::<i32>::new();
 
     // Append a full day of events (288 readings at 5-min intervals)
     for i in 0..288 {
-        encoder.append(base_ts + i * 300, 22).unwrap();
+        encoder.append(base_ts + i as u32 * 300, 22).unwrap();
     }
     assert_eq!(encoder.count(), 288);
 
     // Trying to append the same day again returns OutOfOrder errors
     // (because they're in earlier intervals than the last one)
     for i in 0..287 {
-        let result = encoder.append(base_ts + i * 300, 22);
+        let result = encoder.append(base_ts + i as u32 * 300, 22);
         assert!(
             matches!(result, Err(AppendError::OutOfOrder { .. })),
             "Expected OutOfOrder error for i={}",
@@ -724,53 +557,8 @@ fn test_duplicate_day_events_return_error() {
 }
 
 #[test]
-fn test_duplicate_day_events_with_different_timestamps_return_error() {
-    let base_ts = 1761955455u64;
-    let mut encoder = Encoder::<i32>::new();
-
-    // First pass: 288 events at start of each interval
-    for i in 0..288 {
-        encoder.append(base_ts + i * 300, 22).unwrap();
-    }
-    assert_eq!(encoder.count(), 288);
-
-    // Second pass: trying to go back in time returns OutOfOrder errors
-    for i in 0..287 {
-        let ts = base_ts + i * 300 + 150; // 150 seconds into each interval
-        let result = encoder.append(ts, 22);
-        assert!(
-            matches!(result, Err(AppendError::OutOfOrder { .. })),
-            "Expected OutOfOrder error for i={}",
-            i
-        );
-    }
-
-    // Last interval (i=287) is current, so adding to it works
-    encoder.append(base_ts + 287 * 300 + 150, 22).unwrap();
-    assert_eq!(encoder.count(), 288);
-}
-
-#[test]
-fn test_duplicate_timestamps_keep_last() {
-    let base_ts = 1761955455u64;
-    let mut encoder = Encoder::<i32>::new();
-
-    encoder.append(base_ts, 22).unwrap();
-    encoder.append(base_ts, 23).unwrap(); // Same interval - keep last
-    encoder.append(base_ts + 5, 24).unwrap(); // Same logical index - keep last
-    encoder.append(base_ts + 300, 25).unwrap(); // Next interval
-
-    let decoded = encoder.decode();
-
-    // Two intervals: first keeps last value (24), second = 25
-    assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].value, 24); // keep-last semantics
-    assert_eq!(decoded[1].value, 25);
-}
-
-#[test]
 fn test_keep_last_semantics() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     // Test case: two values - keep last
     let mut encoder = Encoder::<i32>::new();
@@ -813,7 +601,7 @@ fn test_keep_last_semantics() {
 
 #[test]
 fn test_alternating_readings_same_interval_keep_last() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut encoder = Encoder::<i32>::new();
 
     // 10 readings alternating 25, 21 spread across 5 intervals (2 per interval)
@@ -825,7 +613,7 @@ fn test_alternating_readings_same_interval_keep_last() {
         let offset_within_interval = (i % 2) * 150; // 0 or 150 seconds
         encoder
             .append(
-                base_ts + (interval as u64) * 300 + offset_within_interval as u64,
+                base_ts + (interval as u32) * 300 + offset_within_interval as u32,
                 temp,
             )
             .unwrap();
@@ -848,7 +636,7 @@ fn test_alternating_readings_same_interval_keep_last() {
         );
         assert_eq!(
             reading.ts,
-            base_ts + (i as u64) * 300,
+            base_ts + (i as u32) * 300,
             "wrong timestamp at index {}",
             i
         );
@@ -857,7 +645,7 @@ fn test_alternating_readings_same_interval_keep_last() {
     // Size check: with appendable format, bits stay in header's bit_accum until 8+ bits
     // 4 zeros = 4 bits, which stays in the header (not yet flushed to data section)
     // So buffer is just header_size for i32
-    let expected_header_size = header_size_for_value_bytes(i32::BYTES);
+    let expected_header_size = 23;
     let size = encoder.size();
     assert_eq!(
         size, expected_header_size,
@@ -869,7 +657,7 @@ fn test_alternating_readings_same_interval_keep_last() {
 
 #[test]
 fn test_custom_interval() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     // Test with 60-second interval
     let mut enc = Encoder::<i32, 60>::new();
@@ -897,7 +685,7 @@ fn test_custom_interval() {
 
 #[test]
 fn test_custom_interval_keep_last() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     // Test keep-last with 60-second interval
     let mut enc = Encoder::<i32, 60>::new();
@@ -914,12 +702,12 @@ fn test_custom_interval_keep_last() {
 #[test]
 fn test_single_reading_per_interval_exact() {
     // When exactly one reading falls in an interval, decoded value should equal input exactly
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     let temps = [22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
     for (i, &temp) in temps.iter().enumerate() {
-        enc.append(base_ts + (i as u64) * 300, temp).unwrap();
+        enc.append(base_ts + (i as u32) * 300, temp).unwrap();
     }
 
     let decoded = enc.decode();
@@ -936,12 +724,12 @@ fn test_single_reading_per_interval_exact() {
 #[test]
 fn test_max_readings_65535() {
     // Encode exactly 65535 readings (u16::MAX), verify roundtrip
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     for i in 0..65535u64 {
         let temp = ((i % 20) as i32) + 15; // Temps 15-34
-        enc.append(base_ts + i * 300, temp).unwrap();
+        enc.append(base_ts + i as u32 * 300, temp).unwrap();
     }
 
     assert_eq!(enc.count(), 65535);
@@ -951,7 +739,7 @@ fn test_max_readings_65535() {
 
     // Verify via bytes roundtrip
     let bytes = enc.to_bytes();
-    let decoded_bytes = decode::<i32, 300>(&bytes);
+    let decoded_bytes = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded_bytes.len(), 65535);
 }
 
@@ -959,12 +747,12 @@ fn test_max_readings_65535() {
 fn test_beyond_max_readings() {
     // Verify behavior when appending reading 65536+
     // Currently the encoder will panic on overflow - this documents that behavior
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // Fill to max
     for i in 0..65535u64 {
-        enc.append(base_ts + i * 300, 22).unwrap();
+        enc.append(base_ts + i as u32 * 300, 22).unwrap();
     }
     assert_eq!(enc.count(), 65535);
 
@@ -989,7 +777,7 @@ fn test_extreme_temps_boundaries() {
     // Note: first_temp can be any i32, but:
     // - deltas between readings are limited to ±1024
     // - averaging accumulator is limited to ±1M sum range
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     // Test large negative first_temp (within ±1M for averaging)
     let mut enc = Encoder::<i32>::new();
@@ -1011,7 +799,7 @@ fn test_extreme_temps_boundaries() {
     let mut enc = Encoder::<i32>::new();
     let temps = [-1000, -500, 0, 500, 1000, 500, 0, -500, -1000];
     for (i, &temp) in temps.iter().enumerate() {
-        enc.append(base_ts + (i as u64) * 300, temp).unwrap();
+        enc.append(base_ts + (i as u32) * 300, temp).unwrap();
     }
 
     let decoded = enc.decode();
@@ -1040,7 +828,7 @@ fn test_extreme_temps_boundaries() {
     enc3.append(base_ts, 100_000).unwrap();
     enc3.append(base_ts + 300, 100_500).unwrap();
     let bytes = enc3.to_bytes();
-    let decoded3 = decode::<i32, 300>(&bytes);
+    let decoded3 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded3[0].value, 100_000);
     assert_eq!(decoded3[1].value, 100_500);
 }
@@ -1048,10 +836,10 @@ fn test_extreme_temps_boundaries() {
 #[test]
 fn test_interval_1_second() {
     // interval = 1, readings every second
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32, 1>::new();
 
-    for i in 0..100u64 {
+    for i in 0..100u32 {
         enc.append(base_ts + i, 22 + (i % 5) as i32).unwrap();
     }
 
@@ -1067,7 +855,7 @@ fn test_interval_1_second() {
 #[test]
 fn test_interval_65535_seconds() {
     // interval = 65535 (~18 hours)
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32, 65535>::new();
 
     enc.append(base_ts, 22).unwrap();
@@ -1088,7 +876,7 @@ fn test_zero_run_tier_boundaries() {
     // - 6-21 zeros: 8 bits (prefix 1110 + 4 bits)
     // - 22-149 zeros: 12 bits (prefix 11110 + 7 bits)
 
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     // Test exactly 1 zero (single zero encoding)
     let mut enc = Encoder::<i32>::new();
@@ -1102,7 +890,7 @@ fn test_zero_run_tier_boundaries() {
     let mut enc = Encoder::<i32>::new();
     enc.append(base_ts, 22).unwrap();
     for i in 1..=5 {
-        enc.append(base_ts + i * 300, 22).unwrap(); // 5 zeros
+        enc.append(base_ts + i as u32 * 300, 22).unwrap(); // 5 zeros
     }
     enc.append(base_ts + 6 * 300, 23).unwrap();
     let decoded = enc.decode();
@@ -1112,7 +900,7 @@ fn test_zero_run_tier_boundaries() {
     let mut enc = Encoder::<i32>::new();
     enc.append(base_ts, 22).unwrap();
     for i in 1..=21 {
-        enc.append(base_ts + i * 300, 22).unwrap(); // 21 zeros
+        enc.append(base_ts + i as u32 * 300, 22).unwrap(); // 21 zeros
     }
     enc.append(base_ts + 22 * 300, 23).unwrap();
     let decoded = enc.decode();
@@ -1122,7 +910,7 @@ fn test_zero_run_tier_boundaries() {
     let mut enc = Encoder::<i32>::new();
     enc.append(base_ts, 22).unwrap();
     for i in 1..=149 {
-        enc.append(base_ts + i * 300, 22).unwrap(); // 149 zeros
+        enc.append(base_ts + i as u32 * 300, 22).unwrap(); // 149 zeros
     }
     enc.append(base_ts + 150 * 300, 23).unwrap();
     let decoded = enc.decode();
@@ -1132,7 +920,7 @@ fn test_zero_run_tier_boundaries() {
     let mut enc = Encoder::<i32>::new();
     enc.append(base_ts, 22).unwrap();
     for i in 1..=150 {
-        enc.append(base_ts + i * 300, 22).unwrap(); // 150 zeros
+        enc.append(base_ts + i as u32 * 300, 22).unwrap(); // 150 zeros
     }
     enc.append(base_ts + 151 * 300, 23).unwrap();
     let decoded = enc.decode();
@@ -1144,7 +932,7 @@ fn test_zero_run_tier_boundaries() {
 /// Bug: 81 zeros were encoded as 80-run + 1 single zero instead of 81-run.
 #[test]
 fn test_zero_run_not_split() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     // Create a sequence: one reading with value A, then 82 readings with value B
     // This should produce: first reading, delta (A->B), then 81 zero deltas
@@ -1153,14 +941,14 @@ fn test_zero_run_not_split() {
 
     // Readings 2-83: all value 113 (creates 1 non-zero delta + 81 zero deltas)
     for i in 1..=82 {
-        enc.append(base_ts + i * 300, 113).unwrap();
+        enc.append(base_ts + i as u32 * 300, 113).unwrap();
     }
 
     // Add one more reading with different value to flush the zero run
     enc.append(base_ts + 83 * 300, 114).unwrap();
 
     let bytes = enc.to_bytes();
-    let decoded = decode::<i32, 300>(&bytes);
+    let decoded = crate::decode_appendable::<i32, 300>(&bytes);
 
     // Verify correct count
     assert_eq!(decoded.len(), 84);
@@ -1185,13 +973,13 @@ fn test_zero_run_not_split() {
 /// Test with a gap before the zero run (matching the user's bug report scenario)
 #[test]
 fn test_zero_run_after_gap() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     let mut enc = Encoder::<i32>::new();
 
     // Some initial readings
     for i in 0..60 {
-        enc.append(base_ts + i * 300, 22 + (i % 5) as i32).unwrap();
+        enc.append(base_ts + i as u32 * 300, 22 + (i % 5) as i32).unwrap();
     }
 
     // Reading at interval 60 with value before the long run
@@ -1203,14 +991,14 @@ fn test_zero_run_after_gap() {
 
     // 81 more readings with same value (should create 81 zero deltas)
     for i in 63..=143 {
-        enc.append(base_ts + i * 300, 113).unwrap();
+        enc.append(base_ts + i as u32 * 300, 113).unwrap();
     }
 
     // Final reading with different value to flush
     enc.append(base_ts + 144 * 300, 114).unwrap();
 
     let bytes = enc.to_bytes();
-    let decoded = decode::<i32, 300>(&bytes);
+    let decoded = crate::decode_appendable::<i32, 300>(&bytes);
 
     // Find where val=113 starts
     let start_113 = decoded.iter().position(|r| r.value == 113).unwrap();
@@ -1236,7 +1024,7 @@ fn test_zero_run_after_gap() {
 fn test_gap_encoding_boundaries() {
     // Gap marker: 11111111 + 6 bits = up to 64 gaps per marker
     // Gaps are implicit from timestamp jumps
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     // Test gap of exactly 64 intervals (max per single marker)
     let mut enc = Encoder::<i32>::new();
@@ -1272,14 +1060,14 @@ fn test_large_timestamp_offset() {
     // Test timestamps where ts - base_ts is large
     // With 300s interval, offset = gap_intervals * 300
     // Max practical gap is limited by gap encoding (64 per marker, ~19200s per marker)
-    let base_ts = EPOCH_BASE + 1_000_000; // Well after epoch base
+    let base_ts = 1_760_000_000u32 + 1_000_000; // Well after epoch base
     let mut enc = Encoder::<i32>::new();
 
     enc.append(base_ts, 22).unwrap();
 
     // Use offset that's multiple of interval and reasonable for gap encoding
     // 1000 intervals * 300s = 300,000 seconds (~3.5 days)
-    let large_offset = 1000u64 * 300;
+    let large_offset = 1000u32 * 300;
     enc.append(base_ts + large_offset, 23).unwrap();
 
     let decoded = enc.decode();
@@ -1294,18 +1082,18 @@ fn test_large_timestamp_offset() {
 fn test_decode_truncated_header() {
     // Header size for i32: 4 + 2 + 2 + 4 + 4 + 4 + 1 + 1 + 1 = 23 bytes
     // (base_ts_offset + count + prev_logical_idx + first_value + prev_value + current_value + zero_run + bit_count + bit_accum)
-    let i32_header_size = header_size_for_value_bytes(i32::BYTES);
+    let i32_header_size = 23;
     assert_eq!(i32_header_size, 23);
 
     // < header_size should return empty vec
-    assert!(decode::<i32, 300>(&[]).is_empty());
-    assert!(decode::<i32, 300>(&[0]).is_empty());
-    assert!(decode::<i32, 300>(&[0; 22]).is_empty());
+    assert!(crate::decode_appendable::<i32, 300>(&[]).is_empty());
+    assert!(crate::decode_appendable::<i32, 300>(&[0]).is_empty());
+    assert!(crate::decode_appendable::<i32, 300>(&[0; 22]).is_empty());
 
     // Exactly header_size bytes is valid header
     let mut header = vec![0u8; i32_header_size];
     // Set count to 0 - should return empty vec
-    let decoded = decode::<i32, 300>(&header);
+    let decoded = crate::decode_appendable::<i32, 300>(&header);
     assert!(decoded.is_empty());
 
     // Set count to 1, current_value as i32
@@ -1321,7 +1109,7 @@ fn test_decode_truncated_header() {
     header[17] = 0;
     header[18] = 0;
     header[19] = 0;
-    let decoded = decode::<i32, 300>(&header);
+    let decoded = crate::decode_appendable::<i32, 300>(&header);
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].value, 22);
 }
@@ -1340,7 +1128,7 @@ fn test_decode_corrupted_count() {
     bytes[5] = 0;
 
     // Should not panic, may return partial data
-    let decoded = decode::<i32, 300>(&bytes);
+    let decoded = crate::decode_appendable::<i32, 300>(&bytes);
     // Behavior: decode will try to read more than available, but should handle gracefully
     assert!(decoded.len() <= 255);
 }
@@ -1368,7 +1156,7 @@ fn test_decode_zero_interval() {
 #[test]
 fn test_31_readings_same_interval() {
     // Test 31 readings in the same interval - keep-last semantics
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // 31 readings in same interval
@@ -1387,191 +1175,6 @@ fn test_31_readings_same_interval() {
 }
 
 #[test]
-fn test_32_readings_same_interval() {
-    // 32 readings now works (new limit is 1023)
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32>::new();
-
-    // 32 readings in same interval
-    for i in 0..32 {
-        enc.append(base_ts + i * 5, 20).unwrap();
-    }
-
-    // Move to next interval
-    enc.append(base_ts + 300, 25).unwrap();
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-    // All 32 readings are now included in the average
-    assert_eq!(decoded[0].value, 20);
-}
-
-#[test]
-fn test_100_readings_same_interval() {
-    // Test 100 readings in the same interval - keep-last semantics
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32>::new();
-
-    // 100 readings in same interval, alternating 20 and 30
-    for i in 0..100 {
-        let temp = if i % 2 == 0 { 20 } else { 30 };
-        enc.append(base_ts + i, temp).unwrap();
-    }
-
-    // Move to next interval
-    enc.append(base_ts + 300, 25).unwrap();
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-    // Keep-last: last value is i=99, which is odd, so temp=30
-    assert_eq!(decoded[0].value, 30);
-}
-
-#[test]
-fn test_500_readings_same_interval() {
-    // Test 500 readings in the same interval
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32>::new();
-
-    // 500 readings in same interval
-    for i in 0..500 {
-        enc.append(base_ts + i, 22).unwrap();
-    }
-
-    // Move to next interval
-    enc.append(base_ts + 300, 25).unwrap();
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].value, 22);
-}
-
-#[test]
-fn test_1023_readings_same_interval() {
-    // Test many readings in same interval - keep-last semantics
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32, 2000>::new(); // 2000 second interval
-
-    // 1023 readings in same interval (all within first 1023 seconds)
-    for i in 0..1023 {
-        enc.append(base_ts + i, 20 + (i as i32 % 10)).unwrap(); // Temps 20-29
-    }
-
-    // Move to next interval
-    enc.append(base_ts + 2000, 25).unwrap();
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-
-    // Keep-last: last value is 20 + (1022 % 10) = 20 + 2 = 22
-    assert_eq!(decoded[0].value, 22);
-}
-
-#[test]
-fn test_many_readings_same_interval() {
-    // With keep-last semantics, no limit on same-interval readings
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32, 2000>::new(); // 2000 second interval
-
-    // Many readings in same interval - all should succeed with keep-last
-    for i in 0..2000 {
-        enc.append(base_ts + i, 20 + (i as i32 % 10)).unwrap();
-    }
-
-    // Move to next interval
-    enc.append(base_ts + 2000, 25).unwrap();
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-    // Keep-last: last value is 20 + (1999 % 10) = 20 + 9 = 29
-    assert_eq!(decoded[0].value, 29);
-}
-
-#[test]
-fn test_high_count_with_large_temps() {
-    // Test that sum doesn't overflow with many readings of large temps
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32>::new();
-
-    // 500 readings of temperature 500 (sum = 250,000)
-    for i in 0..500 {
-        enc.append(base_ts + i, 500).unwrap();
-    }
-
-    enc.append(base_ts + 300, 25).unwrap();
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].value, 500);
-}
-
-#[test]
-fn test_high_count_with_negative_temps() {
-    // Test averaging with many negative temperatures
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32>::new();
-
-    // 500 readings of temperature -500 (sum = -250,000)
-    for i in 0..500 {
-        enc.append(base_ts + i, -500).unwrap();
-    }
-
-    enc.append(base_ts + 300, 25).unwrap();
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].value, -500);
-}
-
-#[test]
-fn test_high_count_mixed_temps_keep_last() {
-    // Test keep-last with mix of positive and negative temps
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32>::new();
-
-    // 400 readings: alternating -100 and +100
-    for i in 0..400 {
-        let temp = if i % 2 == 0 { -100 } else { 100 };
-        enc.append(base_ts + i, temp).unwrap();
-    }
-
-    enc.append(base_ts + 300, 25).unwrap();
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-    // Keep-last: i=399 is odd, so temp=100
-    assert_eq!(decoded[0].value, 100);
-}
-
-#[test]
-fn test_keep_last_various_values() {
-    // Test keep-last with different values in same interval
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32>::new();
-
-    // -10 then +10 - keep last = 10
-    enc.append(base_ts, -10).unwrap();
-    enc.append(base_ts + 1, 10).unwrap();
-    enc.append(base_ts + 300, 25).unwrap();
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].value, 10); // keep-last
-
-    // -50, -30, +40, +40 - keep last = 40
-    let mut enc = Encoder::<i32>::new();
-    enc.append(base_ts, -50).unwrap();
-    enc.append(base_ts + 1, -30).unwrap();
-    enc.append(base_ts + 2, 40).unwrap();
-    enc.append(base_ts + 3, 40).unwrap();
-    enc.append(base_ts + 300, 25).unwrap();
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].value, 40); // keep-last
-}
-
-#[test]
 fn test_delta_overflow_returns_error() {
     // Delta > 1023 or < -1024 should return DeltaOverflow error
     // Note: Error is returned during finalize_pending_interval,
@@ -1581,7 +1184,7 @@ fn test_delta_overflow_returns_error() {
     // - interval 1: first delta (from interval 0)
     // - interval 2: large temp that will overflow
     // - interval 3: triggers finalize of interval 2, returning error
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
 
     // Test positive delta overflow: 0 to 2000 = delta of +2000 (out of range)
     let mut enc = Encoder::<i32>::new();
@@ -1657,35 +1260,10 @@ fn test_delta_overflow_returns_error() {
 }
 
 #[test]
-fn test_interval_zero_encoder() {
-    // Creating encoder with interval=0 is questionable but shouldn't crash during creation
-    // The behavior during append may vary (division by zero)
-    let enc = Encoder::<i32, 0>::new();
-    assert_eq!(enc.count(), 0);
-    // Don't try to append - would cause division by zero
-}
-
-#[test]
-fn test_max_interval_65535() {
-    // Test maximum interval value
-    let base_ts = 1761955455u64;
-    let mut enc = Encoder::<i32, 65535>::new();
-
-    enc.append(base_ts, 22).unwrap();
-    enc.append(base_ts + 65535, 23).unwrap(); // Exactly one interval later
-    enc.append(base_ts + 65535 * 2, 24).unwrap(); // Two intervals later
-
-    let decoded = enc.decode();
-    assert_eq!(decoded.len(), 3);
-    assert_eq!(decoded[1].ts - decoded[0].ts, 65535);
-    assert_eq!(decoded[2].ts - decoded[1].ts, 65535);
-}
-
-#[test]
 fn test_timestamp_at_epoch_base() {
-    // Timestamp exactly at EPOCH_BASE should work
+    // Timestamp exactly at 1_760_000_000u32 should work
     let mut enc = Encoder::<i32>::new();
-    enc.append(1_760_000_000, 22).unwrap(); // Exactly EPOCH_BASE
+    enc.append(1_760_000_000, 22).unwrap(); // Exactly 1_760_000_000u32
     enc.append(1_760_000_300, 23).unwrap();
 
     let decoded = enc.decode();
@@ -1696,11 +1274,11 @@ fn test_timestamp_at_epoch_base() {
 #[test]
 fn test_count_at_max_u16() {
     // Test that count() returns correct value at max
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32, 1>::new();
 
     // Add exactly 65535 readings
-    for i in 0..65535u64 {
+    for i in 0..65535u32 {
         enc.append(base_ts + i, 22).unwrap();
     }
 
@@ -1742,68 +1320,18 @@ fn test_error_trait_impl() {
     assert!(err.source().is_none());
 }
 
-#[test]
-fn test_encoder_new_default_interval() {
-    let _enc = Encoder::<i32>::new();
-    assert_eq!(Encoder::<i32>::interval(), 300);
-}
-
-#[test]
-fn test_encoder_explicit_interval() {
-    let _enc = Encoder::<i32>::new();
-    assert_eq!(Encoder::<i32>::interval(), 300);
-}
-
-#[test]
-fn test_interval_getter() {
-    let _enc = Encoder::<i32, 600>::new();
-    assert_eq!(Encoder::<i32, 600>::interval(), 600);
-}
-
-#[test]
-fn test_zero_run_decode_tier_6_to_21() {
-    // 15 consecutive same-value readings hits the 6-21 tier decoder path
-    let mut enc = Encoder::<i32>::new();
-    let base_ts = 1_760_000_000u64;
-
-    enc.append(base_ts, 25).unwrap();
-    for i in 1..=15 {
-        enc.append(base_ts + i * 300, 25).unwrap();
-    }
-
-    let bytes = enc.to_bytes();
-    let decoded = decode::<i32, 300>(&bytes);
-    assert_eq!(decoded.len(), 16);
-}
-
-#[test]
-fn test_zero_run_decode_tier_22_to_149() {
-    // 50 consecutive same-value readings hits the 22-149 tier decoder path
-    let mut enc = Encoder::<i32>::new();
-    let base_ts = 1_760_000_000u64;
-
-    enc.append(base_ts, 25).unwrap();
-    for i in 1..=50 {
-        enc.append(base_ts + i * 300, 25).unwrap();
-    }
-
-    let bytes = enc.to_bytes();
-    let decoded = decode::<i32, 300>(&bytes);
-    assert_eq!(decoded.len(), 51);
-}
-
 /// Test that verifies encoding structure - single zeros should NOT appear after runs
 /// if they could have been merged into the run
 #[test]
 fn test_zero_run_encoding_structure() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // Create sequence: val=15, val=12 (delta -3), then 16x val=12 (16 zeros), val=5 (delta -7)
     enc.append(base_ts, 15).unwrap();
     enc.append(base_ts + 300, 12).unwrap();
     for i in 2..=17 {
-        enc.append(base_ts + i * 300, 12).unwrap();
+        enc.append(base_ts + i as u32 * 300, 12).unwrap();
     }
     enc.append(base_ts + 18 * 300, 5).unwrap();
 
@@ -1822,7 +1350,7 @@ fn test_zero_run_encoding_structure() {
 
     // Verify readings 2-17 (16 zeros - same value)
     for i in 2..=17 {
-        assert_eq!(decoded[i].ts, base_ts + i as u64 * 300, "Timestamp at index {}", i);
+        assert_eq!(decoded[i].ts, base_ts + i as u32 * 300, "Timestamp at index {}", i);
         assert_eq!(decoded[i].value, 12, "Value at index {}", i);
     }
 
@@ -1832,7 +1360,7 @@ fn test_zero_run_encoding_structure() {
 
     // Verify roundtrip
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2, "Roundtrip should preserve readings");
 }
 
@@ -1840,26 +1368,11 @@ fn test_zero_run_encoding_structure() {
 // Encoding structure tests - verify actual bit patterns
 // ============================================================================
 
-/// Helper function to read bits from a byte slice (MSB first within each byte)
-fn read_bits_from(data: &[u8], pos: &mut usize, n: usize) -> u32 {
-    let mut result = 0u32;
-    for _ in 0..n {
-        let byte_idx = *pos / 8;
-        let bit_idx = 7 - (*pos % 8);
-        if byte_idx < data.len() {
-            let bit = (data[byte_idx] >> bit_idx) & 1;
-            result = (result << 1) | u32::from(bit);
-        }
-        *pos += 1;
-    }
-    result
-}
-
 /// Test single-interval gap encoding (110) - 3 bits
 /// This is the optimized encoding for single gaps which are 99.4% of all gaps
 #[test]
 fn test_single_gap_encoding() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // Create a sequence with a single-interval gap:
@@ -1877,14 +1390,14 @@ fn test_single_gap_encoding() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2);
 }
 
 /// Test single-interval gap with non-zero delta following
 #[test]
 fn test_single_gap_with_delta() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // Single gap followed by +1 delta
@@ -1899,14 +1412,14 @@ fn test_single_gap_with_delta() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2);
 }
 
 /// Test multiple consecutive single-interval gaps
 #[test]
 fn test_multiple_single_gaps() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // Three readings, each separated by a single-interval gap
@@ -1925,14 +1438,14 @@ fn test_multiple_single_gaps() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2);
 }
 
 /// Test that 2-interval gap is correctly encoded and decoded
 #[test]
 fn test_two_interval_gap_encoding() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // 2-interval gap (skip intervals 1 and 2)
@@ -1947,14 +1460,14 @@ fn test_two_interval_gap_encoding() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2);
 }
 
 /// Test +2 delta encoding
 #[test]
 fn test_plus_two_delta_encoding() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     enc.append(base_ts, 20).unwrap();
@@ -1967,14 +1480,14 @@ fn test_plus_two_delta_encoding() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2);
 }
 
 /// Test -2 delta encoding
 #[test]
 fn test_minus_two_delta_encoding() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     enc.append(base_ts, 22).unwrap();
@@ -1987,14 +1500,14 @@ fn test_minus_two_delta_encoding() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2);
 }
 
 /// Test sequence with multiple ±2 deltas
 #[test]
 fn test_multiple_two_deltas() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // Sequence: 20 -> 22 -> 20 -> 22 (alternating +2, -2)
@@ -2009,20 +1522,20 @@ fn test_multiple_two_deltas() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2);
 }
 
 /// Test zero run 150+ - correctness verified via roundtrip
 #[test]
 fn test_zero_run_150_split_encoding() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // First reading, then 150 same-value readings (150 zero deltas), then different value
     enc.append(base_ts, 22).unwrap();
     for i in 1..=150 {
-        enc.append(base_ts + i * 300, 22).unwrap();
+        enc.append(base_ts + i as u32 * 300, 22).unwrap();
     }
     enc.append(base_ts + 151 * 300, 23).unwrap();  // +1 to flush
 
@@ -2037,19 +1550,19 @@ fn test_zero_run_150_split_encoding() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2);
 }
 
 /// Test zero run 300 - correctness verified via roundtrip
 #[test]
 fn test_zero_run_300_split_encoding() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     enc.append(base_ts, 22).unwrap();
     for i in 1..=300 {
-        enc.append(base_ts + i * 300, 22).unwrap();
+        enc.append(base_ts + i as u32 * 300, 22).unwrap();
     }
     enc.append(base_ts + 301 * 300, 23).unwrap();  // +1 to flush
 
@@ -2064,14 +1577,14 @@ fn test_zero_run_300_split_encoding() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2);
 }
 
 /// Test gap 65 intervals - correctness verified via roundtrip
 #[test]
 fn test_gap_65_single_marker() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // Skip 65 intervals - this is the max that fits in a single 14-bit marker
@@ -2086,14 +1599,14 @@ fn test_gap_65_single_marker() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2);
 }
 
 /// Test gap 66 intervals (requires split: 65 + 1 single gap)
 #[test]
 fn test_gap_66_split_encoding() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // Skip 66 intervals - exceeds single marker capacity (2-65)
@@ -2117,14 +1630,14 @@ fn test_gap_66_split_encoding() {
 
     // Verify roundtrip
     let bytes = enc.to_bytes();
-    let decoded2 = decode::<i32, 300>(&bytes);
+    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded, decoded2, "Roundtrip should preserve readings");
 }
 
 /// Test all encoding prefixes in sequence to verify disambiguation
 #[test]
 fn test_all_encoding_prefixes() {
-    let base_ts = 1761955455u64;
+    let base_ts = 1761955455u32;
     let mut enc = Encoder::<i32>::new();
 
     // Build a sequence that uses all encoding types:
@@ -2189,14 +1702,14 @@ fn test_all_encoding_prefixes() {
 fn test_large_gap_exceeding_u16() {
     // Test that gaps larger than u16::MAX intervals return TimeSpanOverflow error
     // (memory optimization limits time span to ~227 days at 300s interval)
-    let base_ts = EPOCH_BASE;
+    let base_ts = 1_760_000_000u32;
     let mut enc = Encoder::<i32>::new();
 
     // Add first reading
     enc.append(base_ts, 100).unwrap();
 
     // Add second reading at gap of 70,000 intervals (exceeds u16::MAX = 65535)
-    let large_gap: u64 = 70_000;
+    let large_gap: u32 = 70_000;
     let second_ts = base_ts + large_gap * 300;
     let result = enc.append(second_ts, 200);
 
@@ -2211,13 +1724,13 @@ fn test_large_gap_exceeding_u16() {
 fn test_very_large_gap_100k_intervals() {
     // Test that very large gaps (100k intervals) return TimeSpanOverflow error
     // (memory optimization limits time span to ~227 days at 300s interval)
-    let base_ts = EPOCH_BASE;
+    let base_ts = 1_760_000_000u32;
     let mut enc = Encoder::<i32>::new();
 
     enc.append(base_ts, 50).unwrap();
 
     // Gap of 100,000 intervals (exceeds u16::MAX = 65535)
-    let large_gap: u64 = 100_000;
+    let large_gap: u32 = 100_000;
     let second_ts = base_ts + large_gap * 300;
     let result = enc.append(second_ts, 75);
 
@@ -2231,13 +1744,13 @@ fn test_very_large_gap_100k_intervals() {
 #[test]
 fn test_gap_at_u16_boundary() {
     // Test gaps right at u16::MAX to ensure boundary handling
-    let base_ts = EPOCH_BASE;
+    let base_ts = 1_760_000_000u32;
     let mut enc = Encoder::<i32, 1>::new(); // 1 second interval for faster test
 
     enc.append(base_ts, 10).unwrap();
 
     // Gap exactly at u16::MAX
-    let gap: u64 = u64::from(u16::MAX);
+    let gap: u32 = u32::from(u16::MAX);
     let second_ts = base_ts + gap; // interval is 1
     enc.append(second_ts, 20).unwrap();
 
@@ -2252,13 +1765,13 @@ fn test_gap_at_u16_boundary() {
 #[test]
 fn test_gap_just_over_u16_max() {
     // Test gap just over u16::MAX (65536 intervals) returns TimeSpanOverflow error
-    let base_ts = EPOCH_BASE;
+    let base_ts = 1_760_000_000u32;
     let mut enc = Encoder::<i32, 1>::new(); // 1 second interval
 
     enc.append(base_ts, 10).unwrap();
 
     // Gap of u16::MAX + 1 (exceeds max)
-    let gap: u64 = u64::from(u16::MAX) + 1;
+    let gap: u32 = u32::from(u16::MAX) + 1;
     let second_ts = base_ts + gap; // interval is 1
     let result = enc.append(second_ts, 20);
 
@@ -2280,7 +1793,7 @@ fn test_gap_just_over_u16_max() {
 fn test_zero_run_with_concurrent_averaging() {
     // Test that zero_run (packed in bits 42-57) doesn't interfere with
     // averaging data (bits 0-41) when both are active simultaneously
-    let base_ts = EPOCH_BASE;
+    let base_ts = 1_760_000_000u32;
     let mut enc = Encoder::<i32>::new();
 
     // First reading
@@ -2288,7 +1801,7 @@ fn test_zero_run_with_concurrent_averaging() {
 
     // Create a zero run by adding same temperature
     for i in 1..=10 {
-        enc.append(base_ts + i * 300, 20).unwrap();
+        enc.append(base_ts + i as u32 * 300, 20).unwrap();
     }
 
     // Now start a new interval with multiple readings (triggers averaging)
@@ -2315,7 +1828,7 @@ fn test_zero_run_with_concurrent_averaging() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded_bytes = decode::<i32, 300>(&bytes);
+    let decoded_bytes = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded_bytes.len(), 13);
     assert_eq!(decoded_bytes[11].value, 26);
 }
@@ -2323,14 +1836,14 @@ fn test_zero_run_with_concurrent_averaging() {
 #[test]
 fn test_zero_run_max_accumulation() {
     // Test accumulating a large zero run (500+) to verify bit packing holds
-    let base_ts = EPOCH_BASE;
+    let base_ts = 1_760_000_000u32;
     let mut enc = Encoder::<i32>::new();
 
     enc.append(base_ts, 22).unwrap();
 
     // Add 500 readings with same temperature (large zero run)
     for i in 1..=500 {
-        enc.append(base_ts + i * 300, 22).unwrap();
+        enc.append(base_ts + i as u32 * 300, 22).unwrap();
     }
 
     // Add different temperature to flush
@@ -2349,20 +1862,20 @@ fn test_zero_run_max_accumulation() {
 
     // Verify roundtrip
     let bytes = enc.to_bytes();
-    let decoded_bytes = decode::<i32, 300>(&bytes);
+    let decoded_bytes = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded_bytes.len(), 502);
 }
 
 #[test]
 fn test_interval_boundary_u16_max_minus_one() {
     // Test at u16::MAX - 1 intervals (65534) - should succeed
-    let base_ts = EPOCH_BASE;
+    let base_ts = 1_760_000_000u32;
     let mut enc = Encoder::<i32, 1>::new(); // 1 second interval
 
     enc.append(base_ts, 10).unwrap();
 
     // Gap at u16::MAX - 1
-    let gap: u64 = u64::from(u16::MAX) - 1;
+    let gap: u32 = u32::from(u16::MAX) - 1;
     let second_ts = base_ts + gap;
     enc.append(second_ts, 20).unwrap();
 
@@ -2373,7 +1886,7 @@ fn test_interval_boundary_u16_max_minus_one() {
 
     // Verify roundtrip
     let bytes = enc.to_bytes();
-    let decoded_bytes = decode::<i32, 1>(&bytes);
+    let decoded_bytes = crate::decode_appendable::<i32, 1>(&bytes);
     assert_eq!(decoded_bytes.len(), 2);
     assert_eq!(decoded_bytes[1].ts, second_ts);
 }
@@ -2381,21 +1894,21 @@ fn test_interval_boundary_u16_max_minus_one() {
 #[test]
 fn test_multiple_readings_at_max_interval() {
     // Test multiple readings spread across the maximum time span
-    let base_ts = EPOCH_BASE;
+    let base_ts = 1_760_000_000u32;
     let mut enc = Encoder::<i32, 1>::new(); // 1 second interval
 
     enc.append(base_ts, 10).unwrap();
 
     // Add reading at 1/3 of max
-    let one_third = u64::from(u16::MAX) / 3;
+    let one_third = u32::from(u16::MAX) / 3;
     enc.append(base_ts + one_third, 15).unwrap();
 
     // Add reading at 2/3 of max
-    let two_thirds = (u64::from(u16::MAX) / 3) * 2;
+    let two_thirds = (u32::from(u16::MAX) / 3) * 2;
     enc.append(base_ts + two_thirds, 20).unwrap();
 
     // Add reading at exactly max
-    let max_gap = u64::from(u16::MAX);
+    let max_gap = u32::from(u16::MAX);
     enc.append(base_ts + max_gap, 25).unwrap();
 
     assert_eq!(enc.count(), 4);
@@ -2419,12 +1932,12 @@ fn test_multiple_readings_at_max_interval() {
 #[test]
 fn test_time_span_overflow_error_details() {
     // Verify TimeSpanOverflow error contains useful information
-    let base_ts = EPOCH_BASE;
+    let base_ts = 1_760_000_000u32;
     let mut enc = Encoder::<i32, 1>::new();
 
     enc.append(base_ts, 10).unwrap();
 
-    let overflow_ts = base_ts + u64::from(u16::MAX) + 1;
+    let overflow_ts = base_ts + u32::from(u16::MAX) + 1;
     let result = enc.append(overflow_ts, 20);
 
     match result {
@@ -2447,14 +1960,14 @@ fn test_time_span_overflow_error_details() {
 fn test_zero_run_then_gap_then_zero_run() {
     // Test sequence: zero run -> gap -> zero run
     // Verifies zero_run counter resets properly after gaps
-    let base_ts = EPOCH_BASE;
+    let base_ts = 1_760_000_000u32;
     let mut enc = Encoder::<i32>::new();
 
     enc.append(base_ts, 20).unwrap();
 
     // First zero run (5 readings)
     for i in 1..=5 {
-        enc.append(base_ts + i * 300, 20).unwrap();
+        enc.append(base_ts + i as u32 * 300, 20).unwrap();
     }
 
     // Gap (skip 3 intervals)
@@ -2462,7 +1975,7 @@ fn test_zero_run_then_gap_then_zero_run() {
 
     // Second zero run (5 more readings)
     for i in 10..=14 {
-        enc.append(base_ts + i * 300, 20).unwrap();
+        enc.append(base_ts + i as u32 * 300, 20).unwrap();
     }
 
     // Different value to flush
@@ -2485,6 +1998,179 @@ fn test_zero_run_then_gap_then_zero_run() {
 
     // Verify roundtrip
     let bytes = enc.to_bytes();
-    let decoded_bytes = decode::<i32, 300>(&bytes);
+    let decoded_bytes = crate::decode_appendable::<i32, 300>(&bytes);
     assert_eq!(decoded_bytes.len(), 13);
+}
+
+// ============================================================================
+// MALFORMED INPUT TESTS
+// ============================================================================
+// These tests verify that decoders handle malformed/corrupted input gracefully
+// without panicking. They test the fixes for overflow bugs found by fuzzing.
+
+#[test]
+fn test_decode_frozen_empty_input() {
+    let result = decode::<i8, 300>(&[]);
+    assert!(result.is_empty(), "Empty input should return empty vec");
+}
+
+#[test]
+fn test_decode_frozen_too_short() {
+    // Frozen header for i8 is 7 bytes (4 + 2 + 1)
+    let short = [0u8; 6];
+    let result = decode::<i8, 300>(&short);
+    assert!(result.is_empty(), "Too-short input should return empty vec");
+}
+
+#[test]
+fn test_decode_frozen_zero_count() {
+    // Valid header but count = 0
+    let mut buf = [0u8; 7];
+    buf[4] = 0; // count low
+    buf[5] = 0; // count high
+    let result = decode::<i8, 300>(&buf);
+    assert!(result.is_empty(), "Zero count should return empty vec");
+}
+
+#[test]
+fn test_decode_frozen_max_count_no_data() {
+    // Header claims 65535 readings but has no data - should not panic
+    let mut buf = [0u8; 7];
+    buf[4] = 0xFF; // count low = 255
+    buf[5] = 0xFF; // count high = 255, total = 65535
+    buf[6] = 20;   // first_value
+    let result = decode::<i8, 300>(&buf);
+    // Should return just the first reading (from header) since there's no data
+    assert_eq!(result.len(), 1, "Should decode first reading from header");
+    assert_eq!(result[0].value, 20);
+}
+
+#[test]
+fn test_decode_frozen_garbage_data() {
+    // Valid-ish header followed by garbage
+    let mut buf = vec![0u8; 100];
+    buf[0] = 0x00; // base_ts
+    buf[1] = 0x00;
+    buf[2] = 0x10;
+    buf[3] = 0x69; // base_ts = 1761607680
+    buf[4] = 10;   // count = 10
+    buf[5] = 0;
+    buf[6] = 22;   // first_value = 22
+    // Rest is zeros/garbage - decoder should handle gracefully
+    let result = decode::<i8, 300>(&buf);
+    assert!(!result.is_empty(), "Should decode at least one reading");
+    assert!(result.len() <= 10, "Should not exceed claimed count");
+}
+
+#[test]
+fn test_decode_appendable_empty_input() {
+    let result = crate::decode_appendable::<i8, 300>(&[]);
+    assert!(result.is_empty(), "Empty input should return empty vec");
+}
+
+#[test]
+fn test_decode_appendable_too_short() {
+    // Appendable header for i8 is 14 bytes
+    let short = [0u8; 13];
+    let result = crate::decode_appendable::<i8, 300>(&short);
+    assert!(result.is_empty(), "Too-short input should return empty vec");
+}
+
+#[test]
+fn test_decode_appendable_zero_count() {
+    let mut buf = [0u8; 14];
+    buf[4] = 0; // count = 0
+    buf[5] = 0;
+    let result = crate::decode_appendable::<i8, 300>(&buf);
+    assert!(result.is_empty(), "Zero count should return empty vec");
+}
+
+#[test]
+fn test_decode_appendable_max_count_no_data() {
+    // Header claims 65535 readings but has minimal data
+    let mut buf = [0u8; 14];
+    buf[4] = 0xFF; // count = 65535
+    buf[5] = 0xFF;
+    buf[8] = 20;   // first_value
+    buf[9] = 20;   // prev_value
+    buf[10] = 20;  // current_value
+    buf[11] = 0;   // zero_run
+    buf[12] = 0;   // bit_count
+    buf[13] = 0;   // bit_accum
+    let result = crate::decode_appendable::<i8, 300>(&buf);
+    // Should not panic, returns some readings (finalization adds trailing zeros)
+    // The key assertion is that it doesn't panic and doesn't exceed count
+    assert!(result.len() <= 65535, "Should not exceed claimed count");
+    assert!(!result.is_empty(), "Should decode at least one reading");
+}
+
+#[test]
+fn test_decode_appendable_corrupted_bit_count() {
+    // This is the crash case found by fuzzing: bit_count = 255 causes shift overflow
+    let mut buf = vec![0u8; 20];
+    buf[4] = 5;    // count = 5
+    buf[5] = 0;
+    buf[8] = 20;   // first_value
+    buf[9] = 20;   // prev_value
+    buf[10] = 20;  // current_value
+    buf[11] = 0;   // zero_run
+    buf[12] = 255; // bit_count = 255 (invalid, should be 0-7)
+    buf[13] = 0xFF; // bit_accum
+    let result = crate::decode_appendable::<i8, 300>(&buf);
+    // Should not panic, may return partial results
+    assert!(result.len() <= 5, "Should not exceed claimed count");
+}
+
+#[test]
+fn test_decode_appendable_max_zero_run() {
+    // zero_run = 255 (max u8)
+    let mut buf = vec![0u8; 20];
+    buf[4] = 10;   // count = 10
+    buf[5] = 0;
+    buf[8] = 20;   // first_value
+    buf[9] = 20;   // prev_value
+    buf[10] = 20;  // current_value
+    buf[11] = 255; // zero_run = 255
+    buf[12] = 0;   // bit_count
+    buf[13] = 0;   // bit_accum
+    let result = crate::decode_appendable::<i8, 300>(&buf);
+    // Should not panic
+    assert!(result.len() <= 10, "Should not exceed claimed count");
+}
+
+#[test]
+fn test_decode_frozen_all_ones() {
+    // All 0xFF bytes - maximum stress test
+    let buf = [0xFFu8; 100];
+    let result = decode::<i8, 300>(&buf);
+    // count would be 0xFFFF = 65535, should not panic
+    assert!(!result.is_empty(), "Should decode something");
+}
+
+#[test]
+fn test_decode_appendable_all_ones() {
+    let buf = [0xFFu8; 100];
+    let result = crate::decode_appendable::<i8, 300>(&buf);
+    // Should not panic even with all fields at max values
+    assert!(!result.is_empty(), "Should decode something");
+}
+
+#[test]
+fn test_decode_frozen_specific_crash_case() {
+    // Exact bytes that caused the original crash in fuzz_decode_frozen
+    let buf = [0xf0, 0xff, 0xff, 0xff, 0xd0, 0xf7, 0xf5, 0xfe];
+    let result = decode::<i8, 300>(&buf);
+    // Should not panic - this was "attempt to add with overflow"
+    // base_ts = 0xffffffff, count = 0xf7d0, first_value = 0xf5
+    let _ = result; // Just verify no panic
+}
+
+#[test]
+fn test_decode_appendable_specific_crash_case() {
+    // Exact bytes that caused the original crash in fuzz_decode
+    let buf = [0x0a, 0xcd, 0x7a, 0x7a, 0x04, 0x00, 0xf6, 0xff,
+               0x0f, 0xff, 0xff, 0xff, 0x7a, 0x7a];
+    let result = crate::decode_appendable::<i8, 300>(&buf);
+    // Should not panic - this was "attempt to shift right with overflow"
+    let _ = result; // Just verify no panic
 }

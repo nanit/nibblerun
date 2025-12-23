@@ -12,13 +12,13 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let mut enc: Encoder<i32, INTERVAL> = Encoder::new();
-    let base_ts = 1_760_000_000u64;
+    let base_ts = 1_760_000_000u32;
 
     // Track readings per interval for expected keep-last value
     // Key: interval_idx calculated from the first reading's actual timestamp
-    let mut interval_readings: BTreeMap<u64, Vec<i32>> = BTreeMap::new();
+    let mut interval_readings: BTreeMap<u32, Vec<i32>> = BTreeMap::new();
     let mut prev_last: Option<i32> = None;
-    let mut actual_base_ts: Option<u64> = None;
+    let mut actual_base_ts: Option<u32> = None;
 
     // Generate multiple readings per interval
     // Format: each 2 bytes = (offset within interval, temp)
@@ -27,10 +27,10 @@ fuzz_target!(|data: &[u8]| {
             break;
         }
 
-        let interval_idx = i as u64 / 3; // ~3 readings per interval
-        let offset = (chunk[0] as u64) % u64::from(INTERVAL); // offset within interval
+        let interval_idx = i as u32 / 3; // ~3 readings per interval
+        let offset = (chunk[0] as u32) % u32::from(INTERVAL); // offset within interval
         let temp = chunk[1] as i8 as i32;
-        let ts = base_ts + interval_idx * u64::from(INTERVAL) + offset;
+        let ts = base_ts + interval_idx * u32::from(INTERVAL) + offset;
 
         // Check if this would cause delta overflow when finalized
         if let Some(prev) = prev_last {
@@ -53,7 +53,7 @@ fuzz_target!(|data: &[u8]| {
             }
 
             // Calculate interval index relative to actual base_ts
-            let actual_interval_idx = (ts - actual_base_ts.unwrap()) / u64::from(INTERVAL);
+            let actual_interval_idx = (ts - actual_base_ts.unwrap()) / u32::from(INTERVAL);
 
             let readings = interval_readings.entry(actual_interval_idx).or_default();
             readings.push(temp);
@@ -75,7 +75,7 @@ fuzz_target!(|data: &[u8]| {
     // Property: Each decoded reading should be the last value for that interval (keep-last)
     if let Some(base) = actual_base_ts {
         for reading in &decoded {
-            let interval_idx = (reading.ts - base) / u64::from(INTERVAL);
+            let interval_idx = (reading.ts - base) / u32::from(INTERVAL);
             if let Some(readings) = interval_readings.get(&interval_idx) {
                 if !readings.is_empty() {
                     // Keep-last semantics: expect the last value in the interval

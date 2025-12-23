@@ -11,12 +11,12 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let mut enc: Encoder<i32, INTERVAL> = Encoder::new();
-    let base_ts = 1_760_000_000u64;
+    let base_ts = 1_760_000_000u32;
 
     // Track input (interval_idx, temp) pairs
-    let mut inputs: Vec<(u64, i32)> = Vec::new();
+    let mut inputs: Vec<(u32, i32)> = Vec::new();
     let mut prev_temp: Option<i32> = None;
-    let mut current_interval: u64 = 0;
+    let mut current_interval: u32 = 0;
 
     // Each 2 bytes: (gap, temp)
     // gap determines how many intervals to skip (0 = consecutive)
@@ -25,7 +25,7 @@ fuzz_target!(|data: &[u8]| {
             break;
         }
 
-        let gap = chunk[0] as u64;
+        let gap = chunk[0] as u32;
         let temp = chunk[1] as i8 as i32;
 
         // Check delta constraint
@@ -40,7 +40,7 @@ fuzz_target!(|data: &[u8]| {
         current_interval = current_interval.saturating_add(gap);
 
         // Timestamp exactly at interval boundary
-        let ts = base_ts + current_interval * u64::from(INTERVAL);
+        let ts = base_ts + current_interval * u32::from(INTERVAL);
 
         if enc.append(ts, temp).is_ok() {
             inputs.push((current_interval, temp));
@@ -69,7 +69,7 @@ fuzz_target!(|data: &[u8]| {
         );
 
         // Verify timestamp is exactly at the expected interval boundary
-        let expected_ts = base_ts + expected_interval * u64::from(INTERVAL);
+        let expected_ts = base_ts + expected_interval * u32::from(INTERVAL);
         assert_eq!(
             reading.ts, expected_ts,
             "Timestamp mismatch: expected {} (interval {}), got {}",

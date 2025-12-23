@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use nibblerun::{decode, Encoder};
+use nibblerun::{decode_appendable, Encoder};
 
 const INTERVAL: u16 = 300;
 
@@ -11,14 +11,14 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let mut enc: Encoder<i32, INTERVAL> = Encoder::new();
-    let mut ts = 1_760_000_000u64;
+    let mut ts = 1_760_000_000u32;
 
     // Bytes are interpreted as (ts_delta: u16, temp: i8) tuples
     for chunk in data.chunks(3) {
         if chunk.len() < 3 {
             break;
         }
-        let delta = u16::from_le_bytes([chunk[0], chunk[1]]) as u64;
+        let delta = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
         let temp = chunk[2] as i8 as i32;
         ts = ts.saturating_add(delta);
         // Ignore errors - fuzzer may generate invalid data (out of order, delta overflow, etc)
@@ -29,8 +29,8 @@ fuzz_target!(|data: &[u8]| {
     let bytes = enc.to_bytes();
     assert_eq!(enc.size(), bytes.len(), "size mismatch");
 
-    // Property 2: count() == decode().len()
-    let decoded = decode::<i32, INTERVAL>(&bytes);
+    // Property 2: count() == decode_appendable().len()
+    let decoded = decode_appendable::<i32, INTERVAL>(&bytes);
     assert_eq!(enc.count(), decoded.len(), "count mismatch");
 
     // Property 3: direct decode equals decode via bytes
@@ -51,7 +51,7 @@ fuzz_target!(|data: &[u8]| {
         let base = first.ts;
         for reading in &decoded {
             let offset = reading.ts - base;
-            assert_eq!(offset % u64::from(INTERVAL), 0, "timestamp not aligned");
+            assert_eq!(offset % u32::from(INTERVAL), 0, "timestamp not aligned");
         }
     }
 });

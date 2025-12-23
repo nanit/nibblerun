@@ -50,7 +50,7 @@ struct Args {
 }
 
 /// Read timestamp,value pairs from a CSV file
-fn read_csv(path: &PathBuf) -> Result<Vec<(u64, i32)>, String> {
+fn read_csv(path: &PathBuf) -> Result<Vec<(u32, i32)>, String> {
     let file = File::open(path).map_err(|e| format!("Failed to open CSV: {e}"))?;
     let reader = BufReader::new(file);
     let mut readings = Vec::new();
@@ -79,7 +79,7 @@ fn read_csv(path: &PathBuf) -> Result<Vec<(u64, i32)>, String> {
             ));
         }
 
-        let ts: u64 = parts[0]
+        let ts: u32 = parts[0]
             .trim()
             .parse()
             .map_err(|e| format!("Line {}: invalid timestamp '{}': {}", line_num + 1, parts[0], e))?;
@@ -96,15 +96,15 @@ fn read_csv(path: &PathBuf) -> Result<Vec<(u64, i32)>, String> {
 }
 
 /// Generate random readings based on args
-fn generate_readings(args: &Args) -> Vec<(u64, i32)> {
+fn generate_readings(args: &Args) -> Vec<(u32, i32)> {
     let mut rng = rand::rng();
     let mut readings = Vec::new();
 
     // Base timestamp: start of a day at EPOCH_BASE
-    let base_ts: u64 = 1_760_000_000;
-    let interval = u64::from(args.interval);
+    let base_ts: u32 = 1_760_000_000;
+    let interval = u32::from(args.interval);
 
-    let mut current_idx: u64 = 0;
+    let mut current_idx: u32 = 0;
 
     for i in 0..args.readings {
         // Skip some intervals if gaps enabled (roughly 5% chance)
@@ -117,7 +117,7 @@ fn generate_readings(args: &Args) -> Vec<(u64, i32)> {
 
         // Calculate temperature based on time of day
         // Simulates: cooler at night, warmer during day
-        let hour = (current_idx * u64::from(args.interval) / 3600) % 24;
+        let hour = (current_idx * u32::from(args.interval) / 3600) % 24;
         let hour_f = hour as f64 + (current_idx as f64 * f64::from(args.interval) % 3600.0) / 3600.0;
 
         // Temperature curve: min at 5am, max at 3pm

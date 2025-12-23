@@ -6,7 +6,7 @@ use crate::value::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reading<V: Value> {
     /// Unix timestamp in seconds
-    pub ts: u64,
+    pub ts: u32,
     /// Sensor value
     pub value: V,
 }
