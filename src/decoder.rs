@@ -212,6 +212,7 @@ pub(crate) struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     /// Create a new bit reader
+    #[inline]
     pub fn new(buf: &'a [u8]) -> Self {
         let mut r = Self { buf, pos: 0, bits: 0, left: 0 };
         r.refill();
@@ -219,6 +220,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Refill the bit buffer from the byte buffer
+    #[inline]
     fn refill(&mut self) {
         while self.left <= 56 && self.pos < self.buf.len() {
             self.bits = (self.bits << 8) | u64::from(self.buf[self.pos]);
@@ -230,6 +232,7 @@ impl<'a> BitReader<'a> {
     /// Read n bits from the buffer (max 32 bits)
     ///
     /// Returns 0 if not enough bits available.
+    #[inline]
     pub fn read_bits(&mut self, n: u32) -> u32 {
         debug_assert!(n <= 32, "cannot read more than 32 bits at a time");
         if self.left < n { self.refill(); }
@@ -240,6 +243,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Check if there are more bits to read
+    #[inline]
     pub fn has_more(&self) -> bool {
         self.left > 0 || self.pos < self.buf.len()
     }
