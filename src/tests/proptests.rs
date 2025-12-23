@@ -47,21 +47,21 @@ macro_rules! proptest_interval {
                     for (ts, temp) in readings {
                         enc.append(ts, temp).unwrap();
                     }
-                    let decoded = enc.decode();
+                    let decoded = enc.decode().unwrap();
                     prop_assert_eq!(decoded.len(), enc.count());
                 }
 
                 /// Property: encode then decode via bytes equals direct decode
                 #[test]
                 fn prop_roundtrip_via_bytes(readings in arb_readings()) {
-                    use crate::decode_appendable;
                     let mut enc = Encoder::<i32, $interval>::new();
                     for (ts, temp) in readings {
                         enc.append(ts, temp).unwrap();
                     }
 
-                    let direct = enc.decode();
-                    let via_bytes = decode_appendable::<i32, $interval>(&enc.to_bytes());
+                    let direct = enc.decode().unwrap();
+                    let restored = Encoder::<i32, $interval>::from_bytes(&enc.to_bytes()).unwrap();
+                    let via_bytes = restored.decode().unwrap();
 
                     prop_assert_eq!(direct.len(), via_bytes.len());
                     for (d, b) in direct.iter().zip(via_bytes.iter()) {
@@ -78,7 +78,7 @@ macro_rules! proptest_interval {
                         enc.append(ts, temp).unwrap();
                     }
 
-                    let decoded = enc.decode();
+                    let decoded = enc.decode().unwrap();
                     for window in decoded.windows(2) {
                         prop_assert!(window[0].ts < window[1].ts,
                             "Timestamps not monotonic: {} >= {}", window[0].ts, window[1].ts);
@@ -106,7 +106,7 @@ macro_rules! proptest_interval {
                         enc.append(ts, temp).unwrap();
                     }
 
-                    let decoded = enc.decode();
+                    let decoded = enc.decode().unwrap();
                     if let Some(first) = decoded.first() {
                         let base = first.ts;
                         for reading in &decoded {
@@ -130,7 +130,7 @@ macro_rules! proptest_interval {
                         enc.append(ts, temp).unwrap();
                     }
 
-                    let decoded = enc.decode();
+                    let decoded = enc.decode().unwrap();
                     if decoded.is_empty() {
                         return Ok(());
                     }
@@ -179,7 +179,7 @@ macro_rules! proptest_interval {
                         enc.append(ts, temp).unwrap();
                     }
 
-                    let decoded = enc.decode();
+                    let decoded = enc.decode().unwrap();
                     prop_assert_eq!(decoded.len(), temps.len(),
                         "Decoded count {} doesn't match input count {}", decoded.len(), temps.len());
 
@@ -208,7 +208,7 @@ macro_rules! proptest_interval {
                         }
                     }
 
-                    let decoded = enc.decode();
+                    let decoded = enc.decode().unwrap();
                     prop_assert_eq!(decoded.len(), interval_temps.len(),
                         "Expected {} intervals, got {}", interval_temps.len(), decoded.len());
 
@@ -240,7 +240,7 @@ macro_rules! proptest_interval {
                         }
                     }
 
-                    let decoded = enc.decode();
+                    let decoded = enc.decode().unwrap();
                     prop_assert_eq!(decoded.len(), expected_intervals.len(),
                         "Expected {} readings, got {}", expected_intervals.len(), decoded.len());
 
@@ -263,7 +263,7 @@ macro_rules! proptest_interval {
                         enc.append(ts, 22).unwrap();
                     }
 
-                    let decoded = enc.decode();
+                    let decoded = enc.decode().unwrap();
                     prop_assert_eq!(decoded.len(), indices.len(),
                         "Expected {} readings, got {}", indices.len(), decoded.len());
 
@@ -304,7 +304,7 @@ macro_rules! proptest_interval {
                         enc.append(BASE_TS + ts_offset, 22).unwrap();
                     }
 
-                    let decoded = enc.decode();
+                    let decoded = enc.decode().unwrap();
 
                     let base_offset = sorted_timestamps[0];
                     let mut unique_intervals = std::collections::BTreeSet::new();
@@ -345,7 +345,7 @@ macro_rules! proptest_interval {
                         }
                     }
 
-                    let decoded = enc.decode();
+                    let decoded = enc.decode().unwrap();
                     prop_assert_eq!(decoded.len(), expected.len(),
                         "Expected {} readings, got {}", expected.len(), decoded.len());
 

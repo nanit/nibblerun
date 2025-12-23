@@ -47,7 +47,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
 
     // Property: Gaps between readings are preserved correctly
     // The timestamp difference should equal (index_diff * interval)

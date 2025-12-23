@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use nibblerun::{decode_appendable, Encoder};
+use nibblerun::Encoder;
 
 const INTERVAL: u16 = 300;
 
@@ -29,12 +29,13 @@ fuzz_target!(|data: &[u8]| {
     let bytes = enc.to_bytes();
     assert_eq!(enc.size(), bytes.len(), "size mismatch");
 
-    // Property 2: count() == decode_appendable().len()
-    let decoded = decode_appendable::<i32, INTERVAL>(&bytes);
+    // Property 2: count() == Encoder::from_bytes().decode().unwrap().len()
+    let restored = Encoder::<i32, INTERVAL>::from_bytes(&bytes).unwrap();
+    let decoded = restored.decode().unwrap();
     assert_eq!(enc.count(), decoded.len(), "count mismatch");
 
     // Property 3: direct decode equals decode via bytes
-    let direct = enc.decode();
+    let direct = enc.decode().unwrap();
     assert_eq!(direct.len(), decoded.len(), "decode length mismatch");
     for (d, b) in direct.iter().zip(decoded.iter()) {
         assert_eq!(d.ts, b.ts, "timestamp mismatch");

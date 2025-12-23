@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use nibblerun::{decode, decode_appendable, Encoder};
+use nibblerun::{decode_frozen, Encoder};
 
 const INTERVAL: u16 = 300;
 
@@ -42,10 +42,11 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Property: decode(freeze()) == decode_appendable(to_bytes())
+    // Property: decode_frozen(freeze()) == Encoder::from_bytes(to_bytes()).decode().unwrap()
     let frozen = enc.freeze();
-    let from_frozen = decode::<i8, INTERVAL>(&frozen);
-    let from_appendable = decode_appendable::<i8, INTERVAL>(&enc.to_bytes());
+    let from_frozen = decode_frozen::<i8, INTERVAL>(&frozen).unwrap();
+    let restored = Encoder::<i8, INTERVAL>::from_bytes(&enc.to_bytes()).unwrap();
+    let from_appendable = restored.decode().unwrap();
 
     assert_eq!(from_frozen.len(), from_appendable.len(), "count mismatch");
 

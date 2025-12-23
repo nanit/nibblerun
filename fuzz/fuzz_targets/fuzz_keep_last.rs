@@ -70,7 +70,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
 
     // Property: Each decoded reading should be the last value for that interval (keep-last)
     if let Some(base) = actual_base_ts {

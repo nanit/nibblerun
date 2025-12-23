@@ -28,9 +28,11 @@ criterion = "0.5"
 name = "nbl-gen"
 path = "src/bin/nbl_gen.rs"
 
-[[bin]]
-name = "nbl-viz"
-path = "src/bin/nbl_viz.rs"
+# Disabled: nbl-viz depends on internal structures (decode_with_spans, BitSpan)
+# that were removed in the struct-based encoder refactor.
+# [[bin]]
+# name = "nbl-viz"
+# path = "src/bin/nbl_viz.rs"
 
 [[bin]]
 name = "nbl-analyze"

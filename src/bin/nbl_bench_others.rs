@@ -183,7 +183,8 @@ fn bench_nibblerun_appendable(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResul
     // Decode
     let start = Instant::now();
     for buf in &encoded {
-        let decoded = nibblerun::decode_appendable::<i8, 300>(buf);
+        let enc = nibblerun::Encoder::<i8, 300>::from_bytes(buf).unwrap();
+        let decoded = enc.decode();
         black_box(decoded);
     }
     let decode_time = start.elapsed();

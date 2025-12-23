@@ -51,7 +51,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Decode and verify lossless roundtrip
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
 
     assert_eq!(
         decoded.len(),

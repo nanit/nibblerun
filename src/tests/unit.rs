@@ -1,5 +1,5 @@
 use crate::constants::div_by_interval;
-use crate::{decode, AppendError, Encoder};
+use crate::{decode_frozen, AppendError, DecodeError, Encoder};
 
 /// ============================================================================
 /// STRUCT SIZE GUARD - DO NOT MODIFY WITHOUT EXPLICIT AGREEMENT
@@ -49,7 +49,7 @@ fn test_roundtrip() {
     for (i, &t) in temps.iter().enumerate() {
         enc.append(base + i as u32 * 300, t).unwrap();
     }
-    let dec = enc.decode();
+    let dec = enc.decode().unwrap();
     assert_eq!(dec.len(), temps.len());
     for (i, r) in dec.iter().enumerate() {
         assert_eq!(r.value, temps[i]);
@@ -67,7 +67,7 @@ fn test_empty() {
 fn test_single_reading() {
     let mut enc = Encoder::<i32>::new();
     enc.append(1761955455, 22).unwrap();
-    let dec = enc.decode();
+    let dec = enc.decode().unwrap();
     assert_eq!(dec.len(), 1);
     assert_eq!(dec[0].value, 22);
 }
@@ -80,7 +80,7 @@ fn test_gaps() {
     enc.append(base, 22).unwrap();
     // Skip 2 intervals (600 seconds = 2 * 300)
     enc.append(base + 900, 23).unwrap();
-    let dec = enc.decode();
+    let dec = enc.decode().unwrap();
     assert_eq!(dec.len(), 2);
     assert_eq!(dec[0].value, 22);
     assert_eq!(dec[1].value, 23);
@@ -95,7 +95,7 @@ fn test_long_run() {
     for i in 0..200 {
         enc.append(base + i as u32 * 300, 22).unwrap();
     }
-    let dec = enc.decode();
+    let dec = enc.decode().unwrap();
     assert_eq!(dec.len(), 200);
     for r in &dec {
         assert_eq!(r.value, 22);
@@ -121,7 +121,7 @@ fn test_all_deltas() {
     for (i, &t) in temps.iter().enumerate() {
         enc.append(base + i as u32 * 300, t).unwrap();
     }
-    let dec = enc.decode();
+    let dec = enc.decode().unwrap();
     assert_eq!(dec.len(), temps.len());
     for (i, r) in dec.iter().enumerate() {
         assert_eq!(r.value, temps[i], "mismatch at {}", i);
@@ -139,7 +139,7 @@ fn test_temp_range_25_to_39() {
         enc.append(base + i as u32 * 300, t).unwrap();
     }
 
-    let dec = enc.decode();
+    let dec = enc.decode().unwrap();
 
     assert_eq!(dec.len(), temps.len(), "count mismatch");
     for (i, r) in dec.iter().enumerate() {
@@ -157,7 +157,7 @@ fn test_temp_range_neg10_to_39() {
         enc.append(base + i as u32 * 300, t).unwrap();
     }
 
-    let dec = enc.decode();
+    let dec = enc.decode().unwrap();
 
     assert_eq!(dec.len(), temps.len(), "count mismatch");
     for (i, r) in dec.iter().enumerate() {
@@ -199,7 +199,7 @@ fn test_constant_temperature() {
         encoder.append(base_ts + i as u32 * 300, 22).unwrap();
     }
 
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
 
     assert_eq!(decoded.len(), 10);
     for reading in &decoded {
@@ -217,7 +217,7 @@ fn test_small_deltas() {
         encoder.append(base_ts + i as u32 * 300, temp).unwrap();
     }
 
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
 
     assert_eq!(decoded.len(), 5);
     for (i, reading) in decoded.iter().enumerate() {
@@ -234,7 +234,7 @@ fn test_medium_delta() {
     encoder.append(base_ts + 300, 25).unwrap(); // +5
     encoder.append(base_ts + 600, 20).unwrap(); // -5
 
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
 
     assert_eq!(decoded.len(), 3);
     assert_eq!(decoded[0].value, 20);
@@ -251,7 +251,7 @@ fn test_large_delta() {
     encoder.append(base_ts + 300, 520).unwrap(); // +500
     encoder.append(base_ts + 600, 20).unwrap(); // -500
 
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
 
     assert_eq!(decoded.len(), 3);
     assert_eq!(decoded[0].value, 20);
@@ -268,7 +268,7 @@ fn test_long_zero_run() {
         encoder.append(base_ts + i as u32 * 300, 22).unwrap();
     }
 
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
 
     assert_eq!(decoded.len(), 50);
     for reading in &decoded {
@@ -292,7 +292,7 @@ fn test_with_timestamp_jitter() {
         encoder.append(ts, temp).unwrap();
     }
 
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
 
     // All readings should be preserved
     assert_eq!(decoded.len(), 10);
@@ -339,7 +339,7 @@ fn test_specific_day_with_jitter() {
         encoder.append(ts, temp).unwrap();
     }
 
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
 
     // Input analysis (base_ts = day_start + 3 = 1764547203):
     // Reading 0: ts=1764547203, logical_idx = 0 / 300 = 0
@@ -409,7 +409,7 @@ fn test_out_of_order_readings_return_error() {
     // Reading at a later interval is accepted
     encoder.append(base_ts + 900, 25).unwrap();
 
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
 
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].value, 24);
@@ -457,7 +457,7 @@ fn test_reading_before_base_ts_returns_error() {
     encoder.append(base_ts + 300, 23).unwrap();
     assert_eq!(encoder.count(), 2);
 
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].value, 22);
     assert_eq!(decoded[1].value, 23);
@@ -564,7 +564,7 @@ fn test_keep_last_semantics() {
     let mut encoder = Encoder::<i32>::new();
     encoder.append(base_ts, 22).unwrap();
     encoder.append(base_ts + 1, 23).unwrap();
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
     assert_eq!(decoded[0].value, 23); // keep last
 
     // Test case: three values - keep last
@@ -572,7 +572,7 @@ fn test_keep_last_semantics() {
     encoder.append(base_ts, 22).unwrap();
     encoder.append(base_ts + 1, 22).unwrap();
     encoder.append(base_ts + 2, 23).unwrap();
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
     assert_eq!(decoded[0].value, 23); // keep last
 
     // Test case: four values - keep last
@@ -581,21 +581,21 @@ fn test_keep_last_semantics() {
     encoder.append(base_ts + 1, 21).unwrap();
     encoder.append(base_ts + 2, 22).unwrap();
     encoder.append(base_ts + 3, 23).unwrap();
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
     assert_eq!(decoded[0].value, 23); // keep last
 
     // Test case: negative temperatures - keep last
     let mut encoder = Encoder::<i32>::new();
     encoder.append(base_ts, -16).unwrap();
     encoder.append(base_ts + 1, -17).unwrap();
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
     assert_eq!(decoded[0].value, -17); // keep last
 
     // Test case: negative with different values - keep last
     let mut encoder = Encoder::<i32>::new();
     encoder.append(base_ts, -15).unwrap();
     encoder.append(base_ts + 1, -16).unwrap();
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
     assert_eq!(decoded[0].value, -16); // keep last
 }
 
@@ -619,7 +619,7 @@ fn test_alternating_readings_same_interval_keep_last() {
             .unwrap();
     }
 
-    let decoded = encoder.decode();
+    let decoded = encoder.decode().unwrap();
 
     // Should be 5 readings, all with keep-last value 21
     assert_eq!(
@@ -667,7 +667,7 @@ fn test_custom_interval() {
     enc.append(base_ts + 60, 23).unwrap();
     enc.append(base_ts + 120, 24).unwrap();
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 3);
     assert_eq!(decoded[0].ts, base_ts);
     assert_eq!(decoded[1].ts, base_ts + 60);
@@ -676,9 +676,10 @@ fn test_custom_interval() {
     assert_eq!(decoded[1].value, 23);
     assert_eq!(decoded[2].value, 24);
 
-    // Test roundtrip via bytes
+    // Test roundtrip via bytes (appendable format)
     let bytes = enc.to_bytes();
-    let decoded_bytes = decode::<i32, 60>(&bytes);
+    let restored = Encoder::<i32, 60>::from_bytes(&bytes).unwrap();
+    let decoded_bytes = restored.decode().unwrap();
     assert_eq!(decoded_bytes.len(), 3);
     assert_eq!(decoded_bytes[1].ts, base_ts + 60);
 }
@@ -694,7 +695,7 @@ fn test_custom_interval_keep_last() {
     enc.append(base_ts, 20).unwrap();
     enc.append(base_ts + 30, 24).unwrap(); // Same interval, should keep last (24)
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].value, 24); // keep-last semantics
 }
@@ -710,7 +711,7 @@ fn test_single_reading_per_interval_exact() {
         enc.append(base_ts + (i as u32) * 300, temp).unwrap();
     }
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), temps.len());
     for (i, reading) in decoded.iter().enumerate() {
         assert_eq!(
@@ -734,12 +735,12 @@ fn test_max_readings_65535() {
 
     assert_eq!(enc.count(), 65535);
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 65535);
 
     // Verify via bytes roundtrip
     let bytes = enc.to_bytes();
-    let decoded_bytes = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded_bytes = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded_bytes.len(), 65535);
 }
 
@@ -766,7 +767,7 @@ fn test_beyond_max_readings() {
     // Either way, we verify the encoder has 65535 readings
     if result.is_ok() {
         // If it didn't panic, count may have wrapped - check decode still works
-        let decoded = enc.decode();
+        let decoded = enc.decode().unwrap();
         assert!(decoded.len() <= 65535);
     }
 }
@@ -783,7 +784,7 @@ fn test_extreme_temps_boundaries() {
     let mut enc = Encoder::<i32>::new();
     enc.append(base_ts, -500_000).unwrap();
     enc.append(base_ts + 300, -499_500).unwrap(); // delta = +500
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded[0].value, -500_000);
     assert_eq!(decoded[1].value, -499_500);
 
@@ -791,7 +792,7 @@ fn test_extreme_temps_boundaries() {
     let mut enc = Encoder::<i32>::new();
     enc.append(base_ts, 500_000).unwrap();
     enc.append(base_ts + 300, 500_500).unwrap(); // delta = +500
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded[0].value, 500_000);
     assert_eq!(decoded[1].value, 500_500);
 
@@ -802,7 +803,7 @@ fn test_extreme_temps_boundaries() {
         enc.append(base_ts + (i as u32) * 300, temp).unwrap();
     }
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), temps.len());
     for (i, reading) in decoded.iter().enumerate() {
         assert_eq!(
@@ -818,7 +819,7 @@ fn test_extreme_temps_boundaries() {
     enc2.append(base_ts + 300, 1023).unwrap(); // delta = +1023
     enc2.append(base_ts + 600, 0).unwrap(); // delta = -1023
 
-    let decoded2 = enc2.decode();
+    let decoded2 = enc2.decode().unwrap();
     assert_eq!(decoded2[0].value, 0);
     assert_eq!(decoded2[1].value, 1023);
     assert_eq!(decoded2[2].value, 0);
@@ -828,7 +829,7 @@ fn test_extreme_temps_boundaries() {
     enc3.append(base_ts, 100_000).unwrap();
     enc3.append(base_ts + 300, 100_500).unwrap();
     let bytes = enc3.to_bytes();
-    let decoded3 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded3 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded3[0].value, 100_000);
     assert_eq!(decoded3[1].value, 100_500);
 }
@@ -843,7 +844,7 @@ fn test_interval_1_second() {
         enc.append(base_ts + i, 22 + (i % 5) as i32).unwrap();
     }
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 100);
 
     // Verify timestamps are 1 second apart
@@ -862,7 +863,7 @@ fn test_interval_65535_seconds() {
     enc.append(base_ts + 65535, 23).unwrap();
     enc.append(base_ts + 65535 * 2, 24).unwrap();
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 3);
     assert_eq!(decoded[1].ts - decoded[0].ts, 65535);
     assert_eq!(decoded[2].ts - decoded[1].ts, 65535);
@@ -883,7 +884,7 @@ fn test_zero_run_tier_boundaries() {
     enc.append(base_ts, 22).unwrap();
     enc.append(base_ts + 300, 22).unwrap(); // 1 zero delta
     enc.append(base_ts + 600, 23).unwrap();
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 3);
 
     // Test exactly 5 zeros (boundary of 2-5 tier)
@@ -893,7 +894,7 @@ fn test_zero_run_tier_boundaries() {
         enc.append(base_ts + i as u32 * 300, 22).unwrap(); // 5 zeros
     }
     enc.append(base_ts + 6 * 300, 23).unwrap();
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 7);
 
     // Test exactly 21 zeros (boundary of 6-21 tier)
@@ -903,7 +904,7 @@ fn test_zero_run_tier_boundaries() {
         enc.append(base_ts + i as u32 * 300, 22).unwrap(); // 21 zeros
     }
     enc.append(base_ts + 22 * 300, 23).unwrap();
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 23);
 
     // Test exactly 149 zeros (boundary of 22-149 tier)
@@ -913,7 +914,7 @@ fn test_zero_run_tier_boundaries() {
         enc.append(base_ts + i as u32 * 300, 22).unwrap(); // 149 zeros
     }
     enc.append(base_ts + 150 * 300, 23).unwrap();
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 151);
 
     // Test 150 zeros (exceeds single run, needs 2 encodings)
@@ -923,7 +924,7 @@ fn test_zero_run_tier_boundaries() {
         enc.append(base_ts + i as u32 * 300, 22).unwrap(); // 150 zeros
     }
     enc.append(base_ts + 151 * 300, 23).unwrap();
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 152);
 }
 
@@ -948,7 +949,7 @@ fn test_zero_run_not_split() {
     enc.append(base_ts + 83 * 300, 114).unwrap();
 
     let bytes = enc.to_bytes();
-    let decoded = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
 
     // Verify correct count
     assert_eq!(decoded.len(), 84);
@@ -998,7 +999,7 @@ fn test_zero_run_after_gap() {
     enc.append(base_ts + 144 * 300, 114).unwrap();
 
     let bytes = enc.to_bytes();
-    let decoded = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
 
     // Find where val=113 starts
     let start_113 = decoded.iter().position(|r| r.value == 113).unwrap();
@@ -1031,7 +1032,7 @@ fn test_gap_encoding_boundaries() {
     enc.append(base_ts, 22).unwrap();
     enc.append(base_ts + 65 * 300, 23).unwrap(); // Skip 64 intervals
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].ts, base_ts);
     assert_eq!(decoded[1].ts, base_ts + 65 * 300);
@@ -1041,7 +1042,7 @@ fn test_gap_encoding_boundaries() {
     enc.append(base_ts, 22).unwrap();
     enc.append(base_ts + 66 * 300, 23).unwrap(); // Skip 65 intervals
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[1].ts, base_ts + 66 * 300);
 
@@ -1050,7 +1051,7 @@ fn test_gap_encoding_boundaries() {
     enc.append(base_ts, 22).unwrap();
     enc.append(base_ts + 129 * 300, 24).unwrap(); // Skip 128 intervals
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[1].ts, base_ts + 129 * 300);
 }
@@ -1070,7 +1071,7 @@ fn test_large_timestamp_offset() {
     let large_offset = 1000u32 * 300;
     enc.append(base_ts + large_offset, 23).unwrap();
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     // The gap should be exactly large_offset / interval = 1000 intervals
     // But encoded timestamps are quantized to interval
@@ -1085,15 +1086,18 @@ fn test_decode_truncated_header() {
     let i32_header_size = 23;
     assert_eq!(i32_header_size, 23);
 
-    // < header_size should return empty vec
-    assert!(crate::decode_appendable::<i32, 300>(&[]).is_empty());
-    assert!(crate::decode_appendable::<i32, 300>(&[0]).is_empty());
-    assert!(crate::decode_appendable::<i32, 300>(&[0; 22]).is_empty());
+    // Empty input returns empty encoder
+    assert!(Encoder::<i32, 300>::from_bytes(&[]).unwrap().is_empty());
+
+    // < header_size should return error
+    assert!(Encoder::<i32, 300>::from_bytes(&[0]).is_err());
+    assert!(Encoder::<i32, 300>::from_bytes(&[0; 22]).is_err());
 
     // Exactly header_size bytes is valid header
     let mut header = vec![0u8; i32_header_size];
     // Set count to 0 - should return empty vec
-    let decoded = crate::decode_appendable::<i32, 300>(&header);
+    let enc = Encoder::<i32, 300>::from_bytes(&header).unwrap();
+    let decoded = enc.decode().unwrap();
     assert!(decoded.is_empty());
 
     // Set count to 1, current_value as i32
@@ -1109,7 +1113,8 @@ fn test_decode_truncated_header() {
     header[17] = 0;
     header[18] = 0;
     header[19] = 0;
-    let decoded = crate::decode_appendable::<i32, 300>(&header);
+    let enc = Encoder::<i32, 300>::from_bytes(&header).unwrap();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].value, 22);
 }
@@ -1128,14 +1133,15 @@ fn test_decode_corrupted_count() {
     bytes[5] = 0;
 
     // Should not panic, may return partial data
-    let decoded = crate::decode_appendable::<i32, 300>(&bytes);
+    let restored = Encoder::<i32, 300>::from_bytes(&bytes).unwrap();
+    let decoded = restored.decode().unwrap();
     // Behavior: decode will try to read more than available, but should handle gracefully
     assert!(decoded.len() <= 255);
 }
 
 #[test]
 fn test_decode_zero_interval() {
-    // Calling decode with interval=0 - edge case
+    // Calling decode with interval=1 (minimum valid) - edge case
     // Header layout: [0-3] base_ts, [4-5] count, [6-9] first_value
     let mut header = [0u8; 10];
     header[4] = 1; // count = 1
@@ -1146,9 +1152,8 @@ fn test_decode_zero_interval() {
     header[8] = 0;
     header[9] = 0;
 
-    // Should handle gracefully (interval 0 would cause div-by-zero if not handled)
-    let decoded = decode::<i32, 1>(&header);
-    // With interval=0, behavior depends on implementation
+    // Should handle gracefully with Result
+    let decoded = decode_frozen::<i32, 1>(&header).unwrap();
     // At minimum, should not panic
     assert!(decoded.len() <= 1);
 }
@@ -1167,7 +1172,7 @@ fn test_31_readings_same_interval() {
     // Move to next interval
     enc.append(base_ts + 300, 25).unwrap();
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
 
     // Keep-last semantics: last value is 20 + (30 % 10) = 20
@@ -1266,7 +1271,7 @@ fn test_timestamp_at_epoch_base() {
     enc.append(1_760_000_000, 22).unwrap(); // Exactly 1_760_000_000u32
     enc.append(1_760_000_300, 23).unwrap();
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].ts, 1_760_000_000);
 }
@@ -1335,7 +1340,7 @@ fn test_zero_run_encoding_structure() {
     }
     enc.append(base_ts + 18 * 300, 5).unwrap();
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
 
     // Verify we have 19 readings total (indices 0-18)
     assert_eq!(decoded.len(), 19, "Should have 19 readings");
@@ -1360,7 +1365,7 @@ fn test_zero_run_encoding_structure() {
 
     // Verify roundtrip
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2, "Roundtrip should preserve readings");
 }
 
@@ -1380,7 +1385,7 @@ fn test_single_gap_encoding() {
     enc.append(base_ts, 22).unwrap();           // interval 0
     enc.append(base_ts + 600, 22).unwrap();     // interval 2 (skip interval 1 = 1 gap)
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].ts, base_ts);
     assert_eq!(decoded[1].ts, base_ts + 600);
@@ -1390,7 +1395,7 @@ fn test_single_gap_encoding() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2);
 }
 
@@ -1404,7 +1409,7 @@ fn test_single_gap_with_delta() {
     enc.append(base_ts, 22).unwrap();           // interval 0
     enc.append(base_ts + 600, 23).unwrap();     // interval 2, temp +1
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].value, 22);
     assert_eq!(decoded[1].value, 23);
@@ -1412,7 +1417,7 @@ fn test_single_gap_with_delta() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2);
 }
 
@@ -1427,7 +1432,7 @@ fn test_multiple_single_gaps() {
     enc.append(base_ts + 600, 22).unwrap();      // interval 2 (gap of 1)
     enc.append(base_ts + 1200, 22).unwrap();     // interval 4 (gap of 1)
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 3);
     assert_eq!(decoded[0].ts, base_ts);
     assert_eq!(decoded[1].ts, base_ts + 600);
@@ -1438,7 +1443,7 @@ fn test_multiple_single_gaps() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2);
 }
 
@@ -1452,7 +1457,7 @@ fn test_two_interval_gap_encoding() {
     enc.append(base_ts, 22).unwrap();           // interval 0
     enc.append(base_ts + 900, 22).unwrap();     // interval 3 (gap of 2)
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[1].ts - decoded[0].ts, 900);
     assert_eq!(decoded[0].value, 22);
@@ -1460,7 +1465,7 @@ fn test_two_interval_gap_encoding() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2);
 }
 
@@ -1473,14 +1478,14 @@ fn test_plus_two_delta_encoding() {
     enc.append(base_ts, 20).unwrap();
     enc.append(base_ts + 300, 22).unwrap();  // +2 delta
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].value, 20);
     assert_eq!(decoded[1].value, 22);
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2);
 }
 
@@ -1493,14 +1498,14 @@ fn test_minus_two_delta_encoding() {
     enc.append(base_ts, 22).unwrap();
     enc.append(base_ts + 300, 20).unwrap();  // -2 delta
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].value, 22);
     assert_eq!(decoded[1].value, 20);
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2);
 }
 
@@ -1516,13 +1521,13 @@ fn test_multiple_two_deltas() {
     enc.append(base_ts + 600, 20).unwrap();   // -2
     enc.append(base_ts + 900, 22).unwrap();   // +2
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 4);
     assert_eq!(decoded.iter().map(|r| r.value).collect::<Vec<_>>(), vec![20, 22, 20, 22]);
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2);
 }
 
@@ -1539,7 +1544,7 @@ fn test_zero_run_150_split_encoding() {
     }
     enc.append(base_ts + 151 * 300, 23).unwrap();  // +1 to flush
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 152);
 
     // Verify all values are correct
@@ -1550,7 +1555,7 @@ fn test_zero_run_150_split_encoding() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2);
 }
 
@@ -1566,7 +1571,7 @@ fn test_zero_run_300_split_encoding() {
     }
     enc.append(base_ts + 301 * 300, 23).unwrap();  // +1 to flush
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 302);
 
     // Verify all values are correct
@@ -1577,7 +1582,7 @@ fn test_zero_run_300_split_encoding() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2);
 }
 
@@ -1591,7 +1596,7 @@ fn test_gap_65_single_marker() {
     enc.append(base_ts, 22).unwrap();
     enc.append(base_ts + 66 * 300, 22).unwrap();  // 66 intervals later = gap of 65
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[1].ts - decoded[0].ts, 66 * 300);
     assert_eq!(decoded[0].value, 22);
@@ -1599,7 +1604,7 @@ fn test_gap_65_single_marker() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2);
 }
 
@@ -1615,7 +1620,7 @@ fn test_gap_66_split_encoding() {
     enc.append(base_ts + 67 * 300, 22).unwrap();  // 67 intervals later = gap of 66
     enc.append(base_ts + 68 * 300, 23).unwrap();  // delta=1
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 3, "Should have 3 readings");
 
     // Verify timestamps
@@ -1630,7 +1635,7 @@ fn test_gap_66_split_encoding() {
 
     // Verify roundtrip
     let bytes = enc.to_bytes();
-    let decoded2 = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded2 = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded, decoded2, "Roundtrip should preserve readings");
 }
 
@@ -1671,7 +1676,7 @@ fn test_all_encoding_prefixes() {
     // 9. 2-interval gap (11111111 + 6 bits): skip 2
     enc.append(base_ts + 3600, 205).unwrap();  // interval 12
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 10);
 
     // Verify values
@@ -1754,7 +1759,7 @@ fn test_gap_at_u16_boundary() {
     let second_ts = base_ts + gap; // interval is 1
     enc.append(second_ts, 20).unwrap();
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].ts, base_ts);
     assert_eq!(decoded[0].value, 10);
@@ -1814,7 +1819,7 @@ fn test_zero_run_with_concurrent_averaging() {
     // Move to next interval to finalize
     enc.append(base_ts + 12 * 300, 30).unwrap();
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 13);
 
     // Verify zero run was encoded correctly
@@ -1828,7 +1833,7 @@ fn test_zero_run_with_concurrent_averaging() {
 
     // Verify roundtrip through bytes
     let bytes = enc.to_bytes();
-    let decoded_bytes = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded_bytes = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded_bytes.len(), 13);
     assert_eq!(decoded_bytes[11].value, 26);
 }
@@ -1851,7 +1856,7 @@ fn test_zero_run_max_accumulation() {
 
     assert_eq!(enc.count(), 502);
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 502);
 
     // All but last should be 22
@@ -1862,7 +1867,7 @@ fn test_zero_run_max_accumulation() {
 
     // Verify roundtrip
     let bytes = enc.to_bytes();
-    let decoded_bytes = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded_bytes = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded_bytes.len(), 502);
 }
 
@@ -1879,14 +1884,14 @@ fn test_interval_boundary_u16_max_minus_one() {
     let second_ts = base_ts + gap;
     enc.append(second_ts, 20).unwrap();
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 2);
     assert_eq!(decoded[0].ts, base_ts);
     assert_eq!(decoded[1].ts, second_ts);
 
     // Verify roundtrip
     let bytes = enc.to_bytes();
-    let decoded_bytes = crate::decode_appendable::<i32, 1>(&bytes);
+    let decoded_bytes = Encoder::<i32, 1>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded_bytes.len(), 2);
     assert_eq!(decoded_bytes[1].ts, second_ts);
 }
@@ -1913,7 +1918,7 @@ fn test_multiple_readings_at_max_interval() {
 
     assert_eq!(enc.count(), 4);
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 4);
     assert_eq!(decoded[0].value, 10);
     assert_eq!(decoded[1].value, 15);
@@ -1923,9 +1928,10 @@ fn test_multiple_readings_at_max_interval() {
     // Verify timestamps
     assert_eq!(decoded[3].ts, base_ts + max_gap);
 
-    // Verify roundtrip
+    // Verify roundtrip (via appendable format)
     let bytes = enc.to_bytes();
-    let decoded_bytes = decode::<i32, 1>(&bytes);
+    let restored = Encoder::<i32, 1>::from_bytes(&bytes).unwrap();
+    let decoded_bytes = restored.decode().unwrap();
     assert_eq!(decoded_bytes.len(), 4);
 }
 
@@ -1981,7 +1987,7 @@ fn test_zero_run_then_gap_then_zero_run() {
     // Different value to flush
     enc.append(base_ts + 15 * 300, 25).unwrap();
 
-    let decoded = enc.decode();
+    let decoded = enc.decode().unwrap();
     assert_eq!(decoded.len(), 13); // 6 + 1 (after gap) + 5 + 1 = 13
 
     // Verify all readings before the gap are 20
@@ -1998,7 +2004,7 @@ fn test_zero_run_then_gap_then_zero_run() {
 
     // Verify roundtrip
     let bytes = enc.to_bytes();
-    let decoded_bytes = crate::decode_appendable::<i32, 300>(&bytes);
+    let decoded_bytes = Encoder::<i32, 300>::from_bytes(&bytes).unwrap().decode().unwrap();
     assert_eq!(decoded_bytes.len(), 13);
 }
 
@@ -2010,7 +2016,7 @@ fn test_zero_run_then_gap_then_zero_run() {
 
 #[test]
 fn test_decode_frozen_empty_input() {
-    let result = decode::<i8, 300>(&[]);
+    let result = decode_frozen::<i8, 300>(&[]).unwrap();
     assert!(result.is_empty(), "Empty input should return empty vec");
 }
 
@@ -2018,8 +2024,8 @@ fn test_decode_frozen_empty_input() {
 fn test_decode_frozen_too_short() {
     // Frozen header for i8 is 7 bytes (4 + 2 + 1)
     let short = [0u8; 6];
-    let result = decode::<i8, 300>(&short);
-    assert!(result.is_empty(), "Too-short input should return empty vec");
+    let result = decode_frozen::<i8, 300>(&short);
+    assert!(result.is_err(), "Too-short input should return error");
 }
 
 #[test]
@@ -2028,7 +2034,7 @@ fn test_decode_frozen_zero_count() {
     let mut buf = [0u8; 7];
     buf[4] = 0; // count low
     buf[5] = 0; // count high
-    let result = decode::<i8, 300>(&buf);
+    let result = decode_frozen::<i8, 300>(&buf).unwrap();
     assert!(result.is_empty(), "Zero count should return empty vec");
 }
 
@@ -2039,7 +2045,7 @@ fn test_decode_frozen_max_count_no_data() {
     buf[4] = 0xFF; // count low = 255
     buf[5] = 0xFF; // count high = 255, total = 65535
     buf[6] = 20;   // first_value
-    let result = decode::<i8, 300>(&buf);
+    let result = decode_frozen::<i8, 300>(&buf).unwrap();
     // Should return just the first reading (from header) since there's no data
     assert_eq!(result.len(), 1, "Should decode first reading from header");
     assert_eq!(result[0].value, 20);
@@ -2057,36 +2063,37 @@ fn test_decode_frozen_garbage_data() {
     buf[5] = 0;
     buf[6] = 22;   // first_value = 22
     // Rest is zeros/garbage - decoder should handle gracefully
-    let result = decode::<i8, 300>(&buf);
+    let result = decode_frozen::<i8, 300>(&buf).unwrap();
     assert!(!result.is_empty(), "Should decode at least one reading");
     assert!(result.len() <= 10, "Should not exceed claimed count");
 }
 
 #[test]
-fn test_decode_appendable_empty_input() {
-    let result = crate::decode_appendable::<i8, 300>(&[]);
-    assert!(result.is_empty(), "Empty input should return empty vec");
+fn test_from_bytes_empty_input() {
+    let result = Encoder::<i8, 300>::from_bytes(&[]).unwrap();
+    assert!(result.is_empty(), "Empty input should return empty encoder");
 }
 
 #[test]
-fn test_decode_appendable_too_short() {
+fn test_from_bytes_too_short() {
     // Appendable header for i8 is 14 bytes
     let short = [0u8; 13];
-    let result = crate::decode_appendable::<i8, 300>(&short);
-    assert!(result.is_empty(), "Too-short input should return empty vec");
+    let result = Encoder::<i8, 300>::from_bytes(&short);
+    assert!(result.is_err(), "Too-short input should return error");
 }
 
 #[test]
-fn test_decode_appendable_zero_count() {
+fn test_from_bytes_zero_count() {
     let mut buf = [0u8; 14];
     buf[4] = 0; // count = 0
     buf[5] = 0;
-    let result = crate::decode_appendable::<i8, 300>(&buf);
+    let enc = Encoder::<i8, 300>::from_bytes(&buf).unwrap();
+    let result = enc.decode().unwrap();
     assert!(result.is_empty(), "Zero count should return empty vec");
 }
 
 #[test]
-fn test_decode_appendable_max_count_no_data() {
+fn test_from_bytes_max_count_no_data() {
     // Header claims 65535 readings but has minimal data
     let mut buf = [0u8; 14];
     buf[4] = 0xFF; // count = 65535
@@ -2097,7 +2104,8 @@ fn test_decode_appendable_max_count_no_data() {
     buf[11] = 0;   // zero_run
     buf[12] = 0;   // bit_count
     buf[13] = 0;   // bit_accum
-    let result = crate::decode_appendable::<i8, 300>(&buf);
+    let enc = Encoder::<i8, 300>::from_bytes(&buf).unwrap();
+    let result = enc.decode().unwrap();
     // Should not panic, returns some readings (finalization adds trailing zeros)
     // The key assertion is that it doesn't panic and doesn't exceed count
     assert!(result.len() <= 65535, "Should not exceed claimed count");
@@ -2105,7 +2113,7 @@ fn test_decode_appendable_max_count_no_data() {
 }
 
 #[test]
-fn test_decode_appendable_corrupted_bit_count() {
+fn test_from_bytes_corrupted_bit_count() {
     // This is the crash case found by fuzzing: bit_count = 255 causes shift overflow
     let mut buf = vec![0u8; 20];
     buf[4] = 5;    // count = 5
@@ -2116,13 +2124,13 @@ fn test_decode_appendable_corrupted_bit_count() {
     buf[11] = 0;   // zero_run
     buf[12] = 255; // bit_count = 255 (invalid, should be 0-7)
     buf[13] = 0xFF; // bit_accum
-    let result = crate::decode_appendable::<i8, 300>(&buf);
-    // Should not panic, may return partial results
-    assert!(result.len() <= 5, "Should not exceed claimed count");
+    // Invalid bit_count should be rejected by from_bytes validation
+    let result = Encoder::<i8, 300>::from_bytes(&buf);
+    assert!(matches!(result, Err(AppendError::MalformedData)));
 }
 
 #[test]
-fn test_decode_appendable_max_zero_run() {
+fn test_from_bytes_max_zero_run() {
     // zero_run = 255 (max u8)
     let mut buf = vec![0u8; 20];
     buf[4] = 10;   // count = 10
@@ -2133,44 +2141,82 @@ fn test_decode_appendable_max_zero_run() {
     buf[11] = 255; // zero_run = 255
     buf[12] = 0;   // bit_count
     buf[13] = 0;   // bit_accum
-    let result = crate::decode_appendable::<i8, 300>(&buf);
+    let enc = Encoder::<i8, 300>::from_bytes(&buf).unwrap();
+    let result = enc.decode().unwrap();
     // Should not panic
     assert!(result.len() <= 10, "Should not exceed claimed count");
 }
 
 #[test]
 fn test_decode_frozen_all_ones() {
-    // All 0xFF bytes - maximum stress test
+    // All 0xFF bytes - will cause overflow during decode
+    // (first_value = -1, and accumulating many +1023 deltas overflows i32)
+    // Should return MalformedData error instead of panicking
     let buf = [0xFFu8; 100];
-    let result = decode::<i8, 300>(&buf);
-    // count would be 0xFFFF = 65535, should not panic
-    assert!(!result.is_empty(), "Should decode something");
+    let result = decode_frozen::<i8, 300>(&buf);
+    // Should return error due to arithmetic overflow, not panic
+    assert!(result.is_err());
+    assert!(matches!(result, Err(DecodeError::MalformedData)));
 }
 
 #[test]
-fn test_decode_appendable_all_ones() {
+fn test_from_bytes_all_ones() {
+    // All 0xFF bytes - bit_count = 0xFF which is invalid (> 7)
     let buf = [0xFFu8; 100];
-    let result = crate::decode_appendable::<i8, 300>(&buf);
-    // Should not panic even with all fields at max values
-    assert!(!result.is_empty(), "Should decode something");
+    // Should be rejected due to invalid bit_count
+    let result = Encoder::<i8, 300>::from_bytes(&buf);
+    assert!(matches!(result, Err(AppendError::MalformedData)));
 }
 
 #[test]
 fn test_decode_frozen_specific_crash_case() {
     // Exact bytes that caused the original crash in fuzz_decode_frozen
     let buf = [0xf0, 0xff, 0xff, 0xff, 0xd0, 0xf7, 0xf5, 0xfe];
-    let result = decode::<i8, 300>(&buf);
+    let result = decode_frozen::<i8, 300>(&buf);
     // Should not panic - this was "attempt to add with overflow"
     // base_ts = 0xffffffff, count = 0xf7d0, first_value = 0xf5
     let _ = result; // Just verify no panic
 }
 
 #[test]
-fn test_decode_appendable_specific_crash_case() {
+fn test_from_bytes_specific_crash_case() {
     // Exact bytes that caused the original crash in fuzz_decode
+    // This had bit_count = 122 (0x7a) which is invalid (> 7)
     let buf = [0x0a, 0xcd, 0x7a, 0x7a, 0x04, 0x00, 0xf6, 0xff,
                0x0f, 0xff, 0xff, 0xff, 0x7a, 0x7a];
-    let result = crate::decode_appendable::<i8, 300>(&buf);
-    // Should not panic - this was "attempt to shift right with overflow"
-    let _ = result; // Just verify no panic
+    // Should be rejected due to invalid bit_count
+    let result = Encoder::<i8, 300>::from_bytes(&buf);
+    assert!(matches!(result, Err(AppendError::MalformedData)));
+}
+
+#[test]
+fn test_from_bytes_subtract_overflow_crash() {
+    // Crash case from fuzzer: "attempt to subtract with overflow" in decode()
+    // This occurs when current_value.to_i32() - prev_value.to_i32() overflows
+    // The fuzzer tests i8, i16, and i32 - we need to test all three
+    //
+    // The fix validates that deltas won't overflow in from_bytes(), so this
+    // input should be rejected as MalformedData for i32 (where the overflow occurs)
+    let buf: [u8; 25] = [
+        0xed, 0x1b, 0x00, 0x00, 0x00, 0x04, 0x03, 0xe5,
+        0x1b, 0x13, 0x00, 0x00, 0x00, 0x00, 0x04, 0xa7,
+        0x5b, 0xdb, 0x00, 0x58, 0x04, 0xfe, 0xff, 0xf7,
+        0x00
+    ];
+
+    // Test i8 - may succeed or fail validation, but should not panic
+    if let Ok(enc) = Encoder::<i8, 300>::from_bytes(&buf) {
+        let _ = enc.decode().unwrap();
+    }
+
+    // Test i16 - may succeed or fail validation, but should not panic
+    if let Ok(enc) = Encoder::<i16, 300>::from_bytes(&buf) {
+        let _ = enc.decode().unwrap();
+    }
+
+    // Test i32 - should be rejected due to invalid bit_count (254 > 7)
+    // or delta overflow (current - prev overflows i32)
+    let result = Encoder::<i32, 300>::from_bytes(&buf);
+    assert!(result.is_err(), "i32 variant should reject malformed data");
+    assert!(matches!(result, Err(AppendError::MalformedData)));
 }

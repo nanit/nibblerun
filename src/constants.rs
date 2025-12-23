@@ -3,6 +3,24 @@
 /// Base epoch for timestamp compression (reduces storage by ~4 bytes)
 pub const EPOCH_BASE: u64 = 1_760_000_000;
 
+// Zero run encoding thresholds
+/// Maximum zero run encoded as individual bits (1-7)
+pub const MAX_ZERO_RUN_INDIVIDUAL: u32 = 7;
+/// Maximum zero run using 9-bit encoding (8-21)
+pub const MAX_ZERO_RUN_TIER1: u32 = 21;
+/// Maximum zero run using 13-bit encoding (22-149)
+pub const MAX_ZERO_RUN_TIER2: u32 = 149;
+
+// Zero run encoding offsets
+/// Offset for tier 1 encoding (run - 8)
+pub const ZERO_RUN_TIER1_OFFSET: u32 = 8;
+/// Offset for tier 2 encoding (run - 22)
+pub const ZERO_RUN_TIER2_OFFSET: u32 = 22;
+
+// Gap encoding constants
+/// Maximum gap that can be encoded in a single 14-bit marker (2-65)
+pub const MAX_GAP_PER_MARKER: u32 = 65;
+
 // Precomputed delta encoding table: (bits, num_bits) for deltas -10 to +10
 //
 // New encoding scheme (optimized based on real-world data analysis):
@@ -71,17 +89,17 @@ pub fn div_by_interval(x: u64, interval: u16) -> u64 {
 /// | 22+        | 22+ bits         | 13 bits      | run    |
 #[inline]
 pub const fn encode_zero_run(n: u32) -> (u32, u32, u32) {
-    if n <= 7 {
+    if n <= MAX_ZERO_RUN_INDIVIDUAL {
         // Individual zeros are more efficient for small runs
         (0, 1, 1)
-    } else if n <= 21 {
+    } else if n <= MAX_ZERO_RUN_TIER1 {
         // 8-21 zeros: use the 9-bit encoding (prefix 11110 + 4-bit length)
-        ((0b11110 << 4) | (n - 8), 9, n)
-    } else if n <= 149 {
+        ((0b11110 << 4) | (n - ZERO_RUN_TIER1_OFFSET), 9, n)
+    } else if n <= MAX_ZERO_RUN_TIER2 {
         // 22-149 zeros: use the 13-bit encoding (prefix 111110 + 7-bit length)
-        ((0b11_1110 << 7) | (n - 22), 13, n)
+        ((0b11_1110 << 7) | (n - ZERO_RUN_TIER2_OFFSET), 13, n)
     } else {
-        // 150+ zeros: encode 149 at a time
-        ((0b11_1110 << 7) | 127, 13, 149)
+        // 150+ zeros: encode MAX_ZERO_RUN_TIER2 at a time
+        ((0b11_1110 << 7) | 127, 13, MAX_ZERO_RUN_TIER2)
     }
 }

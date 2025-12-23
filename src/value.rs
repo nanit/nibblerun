@@ -35,9 +35,15 @@ pub trait Value: private::Sealed + Copy + Debug + PartialEq + Default {
     fn from_i32(v: i32) -> Self;
 
     /// Write value to byte slice (little-endian)
+    ///
+    /// # Safety
+    /// Caller must ensure `buf.len() >= Self::BYTES`.
     fn write_le(self, buf: &mut [u8]);
 
     /// Read value from byte slice (little-endian)
+    ///
+    /// # Safety
+    /// Caller must ensure `buf.len() >= Self::BYTES`.
     fn read_le(buf: &[u8]) -> Self;
 }
 
@@ -84,9 +90,7 @@ impl Value for i16 {
 
     #[inline]
     fn write_le(self, buf: &mut [u8]) {
-        let bytes = self.to_le_bytes();
-        buf[0] = bytes[0];
-        buf[1] = bytes[1];
+        buf[..2].copy_from_slice(&self.to_le_bytes());
     }
 
     #[inline]
@@ -112,11 +116,7 @@ impl Value for i32 {
 
     #[inline]
     fn write_le(self, buf: &mut [u8]) {
-        let bytes = self.to_le_bytes();
-        buf[0] = bytes[0];
-        buf[1] = bytes[1];
-        buf[2] = bytes[2];
-        buf[3] = bytes[3];
+        buf[..4].copy_from_slice(&self.to_le_bytes());
     }
 
     #[inline]

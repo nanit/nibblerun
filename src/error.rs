@@ -1,4 +1,4 @@
-//! Error types for nibblerun encoding operations.
+//! Error types for nibblerun encoding and decoding operations.
 
 use std::fmt;
 
@@ -25,6 +25,21 @@ pub enum AppendError {
     },
     /// Timestamp exceeds maximum time span (~227 days at 300s interval, ~45 days at 60s)
     TimeSpanOverflow { ts: u32, base_ts: u32, max_intervals: u32 },
+    /// Buffer is too short to contain valid encoded data
+    BufferTooShort { expected: usize, actual: usize },
+    /// Encoded data is malformed or corrupted
+    MalformedData,
+}
+
+/// Error returned when decoding fails
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeError {
+    /// Buffer is too short to contain valid encoded data
+    BufferTooShort { expected: usize, actual: usize },
+    /// Header contains invalid values
+    InvalidHeader,
+    /// Encoded data is malformed or corrupted
+    MalformedData,
 }
 
 impl fmt::Display for AppendError {
@@ -63,8 +78,26 @@ impl fmt::Display for AppendError {
                     "timestamp {ts} exceeds maximum time span from base {base_ts} (max {max_intervals} intervals)"
                 )
             }
+            Self::BufferTooShort { expected, actual } => {
+                write!(f, "buffer too short: expected at least {expected} bytes, got {actual}")
+            }
+            Self::MalformedData => write!(f, "encoded data is malformed or corrupted"),
         }
     }
 }
 
 impl std::error::Error for AppendError {}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BufferTooShort { expected, actual } => {
+                write!(f, "buffer too short: expected at least {expected} bytes, got {actual}")
+            }
+            Self::InvalidHeader => write!(f, "invalid header in encoded data"),
+            Self::MalformedData => write!(f, "encoded data is malformed or corrupted"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}

@@ -1,8 +1,13 @@
 //! Decoding functionality for nibblerun encoded data.
 
-use crate::constants::{encode_zero_run, DELTA_ENCODE};
+use crate::error::DecodeError;
 use crate::reading::Reading;
 use crate::value::Value;
+
+/// Frozen format header size (base_ts: 4 + count: 2 + first_value: V::BYTES)
+const fn frozen_header_size<V: Value>() -> usize {
+    4 + 2 + V::BYTES
+}
 
 /// Decode frozen format bytes back to readings
 ///
@@ -14,26 +19,38 @@ use crate::value::Value;
 /// * `bytes` - Frozen format bytes from `Encoder::freeze()`
 ///
 /// # Returns
-/// Vector of decoded readings. Returns an empty vector if bytes is too short.
-#[must_use]
-pub fn decode<V: Value, const INTERVAL: u16>(bytes: &[u8]) -> Vec<Reading<V>> {
-    decode_frozen::<V, INTERVAL>(bytes)
-}
+/// * `Ok(Vec<Reading<V>>)` - Vector of decoded readings
+/// * `Err(DecodeError::BufferTooShort)` - Buffer is too short to contain valid header
+///
+/// # Example
+/// ```
+/// use nibblerun::{Encoder, decode_frozen};
+///
+/// let mut enc = Encoder::<i32, 300>::new();
+/// enc.append(1000, 22).unwrap();
+/// enc.append(1300, 23).unwrap();
+///
+/// let frozen = enc.freeze();
+/// let readings = decode_frozen::<i32, 300>(&frozen).unwrap();
+/// assert_eq!(readings.len(), 2);
+/// ```
+#[must_use = "decoding returns readings that should be used"]
+pub fn decode_frozen<V: Value, const INTERVAL: u16>(buf: &[u8]) -> Result<Vec<Reading<V>>, DecodeError> {
+    let header_size = frozen_header_size::<V>();
 
-/// Decode frozen format bytes
-#[must_use]
-pub fn decode_frozen<V: Value, const INTERVAL: u16>(buf: &[u8]) -> Vec<Reading<V>> {
-    let header_size = 4 + 2 + V::BYTES;
     if buf.len() < header_size {
-        return Vec::new();
+        if buf.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(DecodeError::BufferTooShort { expected: header_size, actual: buf.len() });
     }
 
-    let base_ts = read_u32_le(buf, 0);
-    let count = read_u16_le(buf, 4) as usize;
+    let base_ts = read_u32_le(buf, 0)?;
+    let count = read_u16_le(buf, 4)? as usize;
     let first_value = V::read_le(&buf[6..]).to_i32();
 
     if count == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let interval = u32::from(INTERVAL);
@@ -41,242 +58,152 @@ pub fn decode_frozen<V: Value, const INTERVAL: u16>(buf: &[u8]) -> Vec<Reading<V
     result.push(Reading { ts: base_ts, value: V::from_i32(first_value) });
 
     if count == 1 {
-        return result;
+        return Ok(result);
     }
 
     let data = &buf[header_size..];
     let mut reader = BitReader::new(data);
+
+    decode_bitstream::<V>(&mut reader, &mut result, base_ts, interval, count, first_value)?;
+
+    Ok(result)
+}
+
+/// Decode bitstream into readings
+///
+/// Shared decode logic used by both `decode_frozen` and `Encoder::decode`.
+/// This function processes the variable-length bit codes and appends readings to the result.
+///
+/// Returns `Err(DecodeError::MalformedData)` if arithmetic overflow is detected.
+#[inline]
+pub(crate) fn decode_bitstream<V: Value>(
+    reader: &mut BitReader<'_>,
+    result: &mut Vec<Reading<V>>,
+    base_ts: u32,
+    interval: u32,
+    count: usize,
+    first_value: i32,
+) -> Result<(), DecodeError> {
     let mut prev_val = first_value;
     let mut idx = 1u32;
 
     while result.len() < count && reader.has_more() {
-        let ts = base_ts.wrapping_add(idx.wrapping_mul(interval));
+        let ts = compute_ts(base_ts, idx, interval)?;
+
+        // 0 = repeat previous value
         if reader.read_bits(1) == 0 {
             result.push(Reading { ts, value: V::from_i32(prev_val) });
-            idx = idx.wrapping_add(1);
+            idx = idx.checked_add(1).ok_or(DecodeError::MalformedData)?;
             continue;
         }
+
+        // 10x = delta ±1
         if reader.read_bits(1) == 0 {
-            prev_val = prev_val.wrapping_add(if reader.read_bits(1) == 0 { 1 } else { -1 });
+            let delta = if reader.read_bits(1) == 0 { 1 } else { -1 };
+            prev_val = prev_val.checked_add(delta).ok_or(DecodeError::MalformedData)?;
             result.push(Reading { ts, value: V::from_i32(prev_val) });
-            idx = idx.wrapping_add(1);
+            idx = idx.checked_add(1).ok_or(DecodeError::MalformedData)?;
             continue;
         }
+
+        // 110 = single gap (skip one interval)
         if reader.read_bits(1) == 0 {
-            idx = idx.wrapping_add(1);
+            idx = idx.checked_add(1).ok_or(DecodeError::MalformedData)?;
             continue;
         }
+
+        // 1110x = delta ±2
         if reader.read_bits(1) == 0 {
-            prev_val = prev_val.wrapping_add(if reader.read_bits(1) == 0 { 2 } else { -2 });
+            let delta = if reader.read_bits(1) == 0 { 2 } else { -2 };
+            prev_val = prev_val.checked_add(delta).ok_or(DecodeError::MalformedData)?;
             result.push(Reading { ts, value: V::from_i32(prev_val) });
-            idx = idx.wrapping_add(1);
+            idx = idx.checked_add(1).ok_or(DecodeError::MalformedData)?;
             continue;
         }
+
+        // 11110xxxx = zero run (8-23 repeats)
         if reader.read_bits(1) == 0 {
-            for _ in 0..reader.read_bits(4) + 8 {
+            let run_len = reader.read_bits(4).saturating_add(8);
+            for _ in 0..run_len {
                 if result.len() >= count { break; }
-                let ts = base_ts.wrapping_add(idx.wrapping_mul(interval));
+                let ts = compute_ts(base_ts, idx, interval)?;
                 result.push(Reading { ts, value: V::from_i32(prev_val) });
-                idx = idx.wrapping_add(1);
+                idx = idx.checked_add(1).ok_or(DecodeError::MalformedData)?;
             }
             continue;
         }
+
+        // 111110xxxxxxx = zero run (22-149 repeats)
         if reader.read_bits(1) == 0 {
-            for _ in 0..reader.read_bits(7) + 22 {
+            let run_len = reader.read_bits(7).saturating_add(22);
+            for _ in 0..run_len {
                 if result.len() >= count { break; }
-                let ts = base_ts.wrapping_add(idx.wrapping_mul(interval));
+                let ts = compute_ts(base_ts, idx, interval)?;
                 result.push(Reading { ts, value: V::from_i32(prev_val) });
-                idx = idx.wrapping_add(1);
+                idx = idx.checked_add(1).ok_or(DecodeError::MalformedData)?;
             }
             continue;
         }
+
+        // 1111110xxxx = small delta [-10, -3] or [3, 10]
         if reader.read_bits(1) == 0 {
             let e = reader.read_bits(4) as i32;
-            prev_val = prev_val.wrapping_add(if e < 8 { e - 10 } else { e - 5 });
+            let delta = if e < 8 { e - 10 } else { e - 5 };
+            prev_val = prev_val.checked_add(delta).ok_or(DecodeError::MalformedData)?;
             result.push(Reading { ts, value: V::from_i32(prev_val) });
-            idx = idx.wrapping_add(1);
+            idx = idx.checked_add(1).ok_or(DecodeError::MalformedData)?;
             continue;
         }
+
+        // 11111110xxxxxxxxxxx = large delta (11-bit signed)
         if reader.read_bits(1) == 0 {
             let raw = reader.read_bits(11);
-            prev_val = prev_val.wrapping_add(if raw & 0x400 != 0 { (raw | 0xFFFF_F800) as i32 } else { raw as i32 });
+            // Sign extend from 11 bits
+            let delta = if raw & 0x400 != 0 { (raw | 0xFFFF_F800) as i32 } else { raw as i32 };
+            prev_val = prev_val.checked_add(delta).ok_or(DecodeError::MalformedData)?;
             result.push(Reading { ts, value: V::from_i32(prev_val) });
-            idx = idx.wrapping_add(1);
+            idx = idx.checked_add(1).ok_or(DecodeError::MalformedData)?;
         } else {
-            idx = idx.wrapping_add(reader.read_bits(6) + 2);
+            // 11111111xxxxxx = multi-gap (skip 2-65 intervals)
+            let gap = reader.read_bits(6).saturating_add(2);
+            idx = idx.checked_add(gap).ok_or(DecodeError::MalformedData)?;
         }
     }
 
-    result
+    Ok(())
 }
 
-/// Decode appendable format bytes (with pending state)
-#[must_use]
-pub fn decode_appendable<V: Value, const INTERVAL: u16>(buf: &[u8]) -> Vec<Reading<V>> {
-    let header_size = 4 + 2 + 2 + V::BYTES * 3 + 3;
-    if buf.len() < header_size {
-        return Vec::new();
-    }
-
-    let base_ts = read_u32_le(buf, 0);
-    let count = read_u16_le(buf, 4) as usize;
-    let first_value = V::read_le(&buf[8..]).to_i32();
-    let prev_value = V::read_le(&buf[8 + V::BYTES..]).to_i32();
-    let current_value = V::read_le(&buf[8 + 2 * V::BYTES..]).to_i32();
-    let zero_run = buf[8 + 3 * V::BYTES];
-    let bit_count = buf[8 + 3 * V::BYTES + 1];
-    let bit_accum = buf[8 + 3 * V::BYTES + 2];
-
-    if count == 0 {
-        return Vec::new();
-    }
-
-    let interval = u32::from(INTERVAL);
-    let first_val = if count == 1 { current_value } else { first_value };
-
-    let mut result = Vec::with_capacity(count);
-    result.push(Reading { ts: base_ts, value: V::from_i32(first_val) });
-
-    if count == 1 {
-        return result;
-    }
-
-    // Finalize bit data
-    let mut final_data = buf[header_size..].to_vec();
-    let mut accum = u32::from(bit_accum);
-    let mut bits = u32::from(bit_count);
-    let mut zeros = u32::from(zero_run);
-
-    let delta = current_value.wrapping_sub(prev_value);
-    if delta == 0 {
-        zeros = zeros.saturating_add(1);
-    } else {
-        flush_pending_zeros(&mut accum, &mut bits, &mut zeros, &mut final_data);
-        write_delta(&mut accum, &mut bits, delta, &mut final_data);
-    }
-    flush_pending_zeros(&mut accum, &mut bits, &mut zeros, &mut final_data);
-    if bits > 0 && bits < 8 {
-        final_data.push((accum << (8 - bits)) as u8);
-    }
-
-    let mut reader = BitReader::new(&final_data);
-    let mut prev_val = first_val;
-    let mut idx = 1u32;
-
-    while result.len() < count && reader.has_more() {
-        let ts = base_ts.wrapping_add(idx.wrapping_mul(interval));
-        if reader.read_bits(1) == 0 {
-            result.push(Reading { ts, value: V::from_i32(prev_val) });
-            idx = idx.wrapping_add(1);
-            continue;
-        }
-        if reader.read_bits(1) == 0 {
-            prev_val = prev_val.wrapping_add(if reader.read_bits(1) == 0 { 1 } else { -1 });
-            result.push(Reading { ts, value: V::from_i32(prev_val) });
-            idx = idx.wrapping_add(1);
-            continue;
-        }
-        if reader.read_bits(1) == 0 {
-            idx = idx.wrapping_add(1);
-            continue;
-        }
-        if reader.read_bits(1) == 0 {
-            prev_val = prev_val.wrapping_add(if reader.read_bits(1) == 0 { 2 } else { -2 });
-            result.push(Reading { ts, value: V::from_i32(prev_val) });
-            idx = idx.wrapping_add(1);
-            continue;
-        }
-        if reader.read_bits(1) == 0 {
-            for _ in 0..reader.read_bits(4) + 8 {
-                if result.len() >= count { break; }
-                let ts = base_ts.wrapping_add(idx.wrapping_mul(interval));
-                result.push(Reading { ts, value: V::from_i32(prev_val) });
-                idx = idx.wrapping_add(1);
-            }
-            continue;
-        }
-        if reader.read_bits(1) == 0 {
-            for _ in 0..reader.read_bits(7) + 22 {
-                if result.len() >= count { break; }
-                let ts = base_ts.wrapping_add(idx.wrapping_mul(interval));
-                result.push(Reading { ts, value: V::from_i32(prev_val) });
-                idx = idx.wrapping_add(1);
-            }
-            continue;
-        }
-        if reader.read_bits(1) == 0 {
-            let e = reader.read_bits(4) as i32;
-            prev_val = prev_val.wrapping_add(if e < 8 { e - 10 } else { e - 5 });
-            result.push(Reading { ts, value: V::from_i32(prev_val) });
-            idx = idx.wrapping_add(1);
-            continue;
-        }
-        if reader.read_bits(1) == 0 {
-            let raw = reader.read_bits(11);
-            prev_val = prev_val.wrapping_add(if raw & 0x400 != 0 { (raw | 0xFFFF_F800) as i32 } else { raw as i32 });
-            result.push(Reading { ts, value: V::from_i32(prev_val) });
-            idx = idx.wrapping_add(1);
-        } else {
-            idx = idx.wrapping_add(reader.read_bits(6) + 2);
-        }
-    }
-
-    result
+/// Compute timestamp with overflow checking
+#[inline]
+fn compute_ts(base_ts: u32, idx: u32, interval: u32) -> Result<u32, DecodeError> {
+    let offset = idx.checked_mul(interval).ok_or(DecodeError::MalformedData)?;
+    base_ts.checked_add(offset).ok_or(DecodeError::MalformedData)
 }
 
 // Helper functions
 
-fn flush_pending_zeros(accum: &mut u32, bits: &mut u32, zeros: &mut u32, out: &mut Vec<u8>) {
-    // Limit iterations to prevent runaway loops from malformed input
-    let mut iterations = 0u32;
-    while *zeros > 0 && iterations < 1000 {
-        iterations += 1;
-        let (b, n, c) = encode_zero_run(*zeros);
-        if n > 0 && n < 32 {
-            *accum = accum.wrapping_shl(n) | b;
-            *bits = bits.saturating_add(n);
-        }
-        *zeros = zeros.saturating_sub(c);
-        while *bits >= 8 {
-            *bits -= 8;
-            if *bits < 32 {
-                out.push((*accum >> *bits) as u8);
-            }
-        }
-    }
-}
-
-fn write_delta(accum: &mut u32, bits: &mut u32, delta: i32, out: &mut Vec<u8>) {
-    let idx = delta.wrapping_add(10) as usize;
-    let (b, n) = if idx <= 20 {
-        let (b, n) = DELTA_ENCODE[idx];
-        if n > 0 { (b, u32::from(n)) } else { ((0b1111_1110_u32 << 11) | ((delta as u32) & 0x7FF), 19) }
-    } else {
-        ((0b1111_1110_u32 << 11) | ((delta as u32) & 0x7FF), 19)
-    };
-    if n > 0 && n < 32 {
-        *accum = accum.wrapping_shl(n) | b;
-        *bits = bits.saturating_add(n);
-    }
-    while *bits >= 8 {
-        *bits -= 8;
-        if *bits < 32 {
-            out.push((*accum >> *bits) as u8);
-        }
-    }
-}
-
+/// Read a u16 from buffer in little-endian format
 #[inline]
-fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([buf[offset], buf[offset + 1]])
+fn read_u16_le(buf: &[u8], offset: usize) -> Result<u16, DecodeError> {
+    let end = offset.saturating_add(2);
+    if end > buf.len() {
+        return Err(DecodeError::BufferTooShort { expected: end, actual: buf.len() });
+    }
+    Ok(u16::from_le_bytes([buf[offset], buf[offset + 1]]))
 }
 
+/// Read a u32 from buffer in little-endian format
 #[inline]
-fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
+fn read_u32_le(buf: &[u8], offset: usize) -> Result<u32, DecodeError> {
+    let end = offset.saturating_add(4);
+    if end > buf.len() {
+        return Err(DecodeError::BufferTooShort { expected: end, actual: buf.len() });
+    }
+    Ok(u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]))
 }
 
-struct BitReader<'a> {
+/// Bit reader for decoding variable-length bit codes
+pub(crate) struct BitReader<'a> {
     buf: &'a [u8],
     pos: usize,
     bits: u64,
@@ -284,28 +211,36 @@ struct BitReader<'a> {
 }
 
 impl<'a> BitReader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
+    /// Create a new bit reader
+    pub fn new(buf: &'a [u8]) -> Self {
         let mut r = Self { buf, pos: 0, bits: 0, left: 0 };
         r.refill();
         r
     }
 
+    /// Refill the bit buffer from the byte buffer
     fn refill(&mut self) {
         while self.left <= 56 && self.pos < self.buf.len() {
             self.bits = (self.bits << 8) | u64::from(self.buf[self.pos]);
             self.pos += 1;
-            self.left += 8;
+            self.left = self.left.saturating_add(8);
         }
     }
 
-    fn read_bits(&mut self, n: u32) -> u32 {
+    /// Read n bits from the buffer (max 32 bits)
+    ///
+    /// Returns 0 if not enough bits available.
+    pub fn read_bits(&mut self, n: u32) -> u32 {
+        debug_assert!(n <= 32, "cannot read more than 32 bits at a time");
         if self.left < n { self.refill(); }
         if self.left < n { return 0; }
         self.left -= n;
-        ((self.bits >> self.left) & ((1 << n) - 1)) as u32
+        // Safe: n <= 32, so 1 << n won't overflow
+        ((self.bits >> self.left) & ((1u64 << n) - 1)) as u32
     }
 
-    fn has_more(&self) -> bool {
+    /// Check if there are more bits to read
+    pub fn has_more(&self) -> bool {
         self.left > 0 || self.pos < self.buf.len()
     }
 }
