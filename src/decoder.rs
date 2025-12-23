@@ -123,11 +123,11 @@ pub(crate) fn decode_bitstream<V: Value>(
 
         // 11110xxxx = zero run (8-23 repeats)
         if reader.read_bits(1) == 0 {
-            let run_len = reader.read_bits(4).saturating_add(8);
+            let run_len = (reader.read_bits(4) + 8).min((count - result.len()) as u32);
+            let mut ts = compute_ts(base_ts, idx, interval)?;
             for _ in 0..run_len {
-                if result.len() >= count { break; }
-                let ts = compute_ts(base_ts, idx, interval)?;
                 result.push(Reading { ts, value: V::from_i32(prev_val) });
+                ts = ts.checked_add(interval).ok_or(DecodeError::MalformedData)?;
                 idx = idx.checked_add(1).ok_or(DecodeError::MalformedData)?;
             }
             continue;
@@ -135,11 +135,11 @@ pub(crate) fn decode_bitstream<V: Value>(
 
         // 111110xxxxxxx = zero run (22-149 repeats)
         if reader.read_bits(1) == 0 {
-            let run_len = reader.read_bits(7).saturating_add(22);
+            let run_len = (reader.read_bits(7) + 22).min((count - result.len()) as u32);
+            let mut ts = compute_ts(base_ts, idx, interval)?;
             for _ in 0..run_len {
-                if result.len() >= count { break; }
-                let ts = compute_ts(base_ts, idx, interval)?;
                 result.push(Reading { ts, value: V::from_i32(prev_val) });
+                ts = ts.checked_add(interval).ok_or(DecodeError::MalformedData)?;
                 idx = idx.checked_add(1).ok_or(DecodeError::MalformedData)?;
             }
             continue;
@@ -222,10 +222,19 @@ impl<'a> BitReader<'a> {
     /// Refill the bit buffer from the byte buffer
     #[inline]
     fn refill(&mut self) {
+        // Fast path: load full u64 if buffer has 8+ bytes remaining
+        if self.left == 0 && self.pos + 8 <= self.buf.len() {
+            let bytes: [u8; 8] = self.buf[self.pos..self.pos + 8].try_into().unwrap();
+            self.bits = u64::from_be_bytes(bytes);
+            self.pos += 8;
+            self.left = 64;
+            return;
+        }
+        // Slow path: byte-by-byte (safe: left <= 56 ensures no overflow when adding 8)
         while self.left <= 56 && self.pos < self.buf.len() {
             self.bits = (self.bits << 8) | u64::from(self.buf[self.pos]);
             self.pos += 1;
-            self.left = self.left.saturating_add(8);
+            self.left += 8; // Safe: guarded by while condition (left <= 56)
         }
     }
 
