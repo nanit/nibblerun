@@ -69,14 +69,15 @@
       <text x="575" y="12" text-anchor="middle" class="label">data...</text>
       <text x="575" y="25" text-anchor="middle" class="bits">variable</text>
     </g>
-    <text x="10" y="80" class="bits">bit_cnt = number of bits in accumulator (0-7) | bit_acc = partial byte buffer | When bit_cnt reaches 8, byte flushes to data[]</text>
+    <text x="10" y="75" class="bits">bit_cnt = number of bits in accumulator (0-7) | bit_acc = partial byte buffer</text>
+    <text x="10" y="88" class="bits">When bit_cnt reaches 8, byte flushes to data[]</text>
   </g>
 
   <!-- Scenario 1: Zero Delta -->
   <g transform="translate(50, 195)">
     <rect x="0" y="0" width="820" height="280" class="section-bg"/>
     <text x="15" y="25" class="title">Scenario 1: Append Same Value (Zero Delta)</text>
-    <text x="15" y="45" class="subtitle">Appending temp=25 when current is already 25. Zero deltas are buffered in zero_run, not written immediately.</text>
+    <text x="15" y="45" class="subtitle">Appending temp=25 when current is already 25. Zero deltas are buffered in zero_run.</text>
 
     <!-- Before State -->
     <text x="15" y="75" class="label" font-weight="bold">BEFORE (2 readings, temp=25, zero_run=1):</text>
@@ -152,7 +153,7 @@
   <g transform="translate(50, 490)">
     <rect x="0" y="0" width="820" height="360" class="section-bg"/>
     <text x="15" y="25" class="title">Scenario 2: Append Different Value (+1 Delta)</text>
-    <text x="15" y="45" class="subtitle">Appending temp=26 when current is 25. Flushes buffered zeros to accumulator, then writes delta bits.</text>
+    <text x="15" y="45" class="subtitle">Appending temp=26 when current is 25. Flushes zeros to accumulator, then writes delta bits.</text>
 
     <!-- Before State -->
     <text x="15" y="75" class="label" font-weight="bold">BEFORE (4 readings, temp=25, zero_run=3):</text>
@@ -259,7 +260,7 @@
   <g transform="translate(50, 865)">
     <rect x="0" y="0" width="820" height="450" class="section-bg"/>
     <text x="15" y="25" class="title">Scenario 2b: Accumulator Fills → Byte Flushes to data[]</text>
-    <text x="15" y="45" class="subtitle">Continuing from above: append another +1 delta. Now bit_cnt=6+3=9, so 8 bits flush to data[].</text>
+    <text x="15" y="45" class="subtitle">Append another +1 delta. bit_cnt=6+3=9, so 8 bits flush to data[].</text>
 
     <!-- Before State -->
     <text x="15" y="75" class="label" font-weight="bold">BEFORE (bit_cnt=6, need to write 3 more bits):</text>
@@ -495,17 +496,18 @@
 
     <!-- Encoding comparison -->
     <text x="15" y="250" class="label" font-weight="bold">When eventually flushed:</text>
-    <text x="15" y="265" class="bits">7 zeros → 0000000 (7 individual bits) | 8 zeros → 11110_0000 (9-bit run code) | 21 zeros → 11110_1101 (still 9 bits!)</text>
+    <text x="15" y="265" class="bits">7 zeros → 0000000 (7 individual bits) | 8 zeros → 11110_0000 (9-bit run code)</text>
+    <text x="15" y="278" class="bits">21 zeros → 11110_1101 (still 9 bits!)</text>
   </g>
 
   <!-- Scenario 4: Single Gap -->
   <g transform="translate(50, 1625)">
     <rect x="0" y="0" width="820" height="440" class="section-bg"/>
     <text x="15" y="25" class="title">Scenario 4: Single-Interval Gap (detected when new reading arrives)</text>
-    <text x="15" y="45" class="subtitle">New reading at interval 7 reveals that interval 6 was skipped. Accumulated zeros flushed BEFORE gap marker.</text>
+    <text x="15" y="45" class="subtitle">New reading at interval 7 reveals interval 6 was skipped. Zeros flushed BEFORE gap marker.</text>
 
     <!-- Before State -->
-    <text x="15" y="75" class="label" font-weight="bold">BEFORE (last reading at interval 5, temp=25, already had 3 consecutive 25s):</text>
+    <text x="15" y="75" class="label" font-weight="bold">BEFORE (last reading at interval 5, temp=25, 3 consecutive 25s):</text>
     <g transform="translate(15, 85)">
       <rect x="65" y="0" width="45" height="35" class="header-unchanged"/>
       <text x="87" y="15" text-anchor="middle" class="label">count</text>
@@ -542,7 +544,7 @@
 
     <!-- Gap detection explanation -->
     <text x="15" y="180" class="label" font-weight="bold">GAP DETECTION: new_idx(7) - prev_idx(5) - 1 = 1 gap</text>
-    <text x="15" y="195" class="label">Steps: 1. Flush zero_run=3 → write "000"  2. Write gap marker "110"  3. Handle value (delta=0 → zero_run=1)</text>
+    <text x="15" y="195" class="label">Steps: 1. Flush zero_run=3 → "000"  2. Gap marker "110"  3. delta=0 → zero_run=1</text>
 
     <!-- After State -->
     <text x="15" y="220" class="label" font-weight="bold">AFTER:</text>
@@ -598,10 +600,11 @@
     </g>
     <text x="15" y="340" class="bits" fill="#34d399">■ Green: Flushed zeros (3 bits from zero_run=3)</text>
     <text x="15" y="355" class="bits" fill="#ef4444">■ Red: Gap marker "110" (3 bits)</text>
-    <text x="15" y="370" class="bits">Value=25 same as curr_v → delta=0 → zero_run=1 (deferred, no bits written yet)</text>
+    <text x="15" y="370" class="bits">Value=25 same as curr_v → delta=0 → zero_run=1 (deferred)</text>
 
-    <text x="15" y="410" class="insight">CRITICAL: Zeros always flushed BEFORE gap marker! Bitstream preserves temporal order: &lt;zeros&gt;&lt;gap&gt;&lt;zeros&gt;&lt;gap&gt;&lt;delta&gt;</text>
-    <text x="15" y="428" class="insight">This ensures decoder reconstructs readings in correct chronological order.</text>
+    <text x="15" y="400" class="insight">CRITICAL: Zeros always flushed BEFORE gap marker!</text>
+    <text x="15" y="415" class="insight">Bitstream preserves temporal order: &lt;zeros&gt;&lt;gap&gt;&lt;zeros&gt;&lt;gap&gt;&lt;delta&gt;</text>
+    <text x="15" y="430" class="insight">This ensures decoder reconstructs readings in correct chronological order.</text>
   </g>
 
   <!-- Scenario 5: Large Gap -->
@@ -678,7 +681,7 @@
       <text x="575" y="30" text-anchor="middle" class="value">0xFF</text>
     </g>
 
-    <text x="15" y="250" class="bits">14 bits = 11111111 (prefix, 8 bits → data[0]) + 001000 (gap-2=8, 6 bits → bit_acc)</text>
+    <text x="15" y="250" class="bits">14 bits = 11111111 (prefix, 8 bits → data[0]) + 001000 (gap-2=8, 6 bits → acc)</text>
     <text x="15" y="270" class="insight">Key insight: Gap value stored as (gap - 2) since gaps 0-1 use other encodings.</text>
   </g>
 
@@ -756,7 +759,7 @@
       <text x="582" y="30" text-anchor="middle" class="value">0xFE 0x19</text>
     </g>
 
-    <text x="15" y="250" class="bits">19 bits = 11111110 (prefix) + 00000011001 (25 in 11-bit signed) = 0xFE 0x19 + 3 bits in acc</text>
+    <text x="15" y="250" class="bits">19 bits = 11111110 (prefix) + 00000011001 (25 as 11-bit) = 0xFE 0x19 + 3 bits in acc</text>
     <text x="15" y="270" class="insight">Key insight: Deltas ±11 to ±1023 use 19-bit encoding. Beyond ±1023, append fails.</text>
   </g>
 
@@ -826,9 +829,9 @@
       <text x="0" y="65" class="bits">    │</text>
       <text x="0" y="80" class="bits">    ├─ if delta == 0 → zero_run++ (no bits written!)</text>
       <text x="0" y="95" class="bits">    │</text>
-      <text x="0" y="110" class="bits">    └─ if delta != 0 → flush zero_run as bits, then write delta bits</text>
+      <text x="0" y="110" class="bits">    └─ if delta != 0 → flush zero_run, write delta bits</text>
       <text x="0" y="125" class="bits">                        │</text>
-      <text x="0" y="140" class="bits">                        └─ bits go to bit_acc, overflow (≥8) flushes to data[]</text>
+      <text x="0" y="140" class="bits">                        └─ bits → bit_acc, overflow (≥8) → data[]</text>
     </g>
   </g>
 </svg>

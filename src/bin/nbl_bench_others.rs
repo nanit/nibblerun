@@ -866,8 +866,8 @@ fn bench_delta_of_delta(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
 // HTML Report Generation
 // ============================================================================
 
-/// Embedded Plotly library for standalone HTML reports
-const PLOTLY_JS: &str = include_str!("plotly-basic.min.js");
+/// Plotly CDN URL for HTML reports
+const PLOTLY_CDN: &str = "https://cdn.plot.ly/plotly-basic-2.35.2.min.js";
 
 /// Generate an HTML report with interactive Plotly charts
 fn generate_html_report(
@@ -951,7 +951,7 @@ fn generate_html_report(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Compression Benchmark Report</title>
-    <script>{plotly_js}</script>
+    <script src="{plotly_cdn}"></script>
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
@@ -1322,7 +1322,7 @@ fn generate_html_report(
 </script>
 </body>
 </html>"##,
-        plotly_js = PLOTLY_JS,
+        plotly_cdn = PLOTLY_CDN,
         num_devices = num_devices,
         total_readings = total_readings,
         raw_size_mb = raw_size as f64 / (1024.0 * 1024.0),
