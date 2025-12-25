@@ -1,6 +1,6 @@
 [package]
 name = "nibblerun"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 
 [dependencies]
@@ -28,11 +28,9 @@ criterion = "0.5"
 name = "nbl-gen"
 path = "src/bin/nbl_gen.rs"
 
-# Disabled: nbl-viz depends on internal structures (decode_with_spans, BitSpan)
-# that were removed in the struct-based encoder refactor.
-# [[bin]]
-# name = "nbl-viz"
-# path = "src/bin/nbl_viz.rs"
+[[bin]]
+name = "nbl-viz"
+path = "src/bin/nbl_viz.rs"
 
 [[bin]]
 name = "nbl-analyze"
