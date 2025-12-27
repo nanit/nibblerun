@@ -1193,30 +1193,28 @@ fn test_delta_overflow_returns_error() {
 
     // Test positive delta overflow: 0 to 2000 = delta of +2000 (out of range)
     let mut enc = Encoder::<i32>::new();
-    enc.append(base_ts, 0).unwrap(); // interval 0
-    enc.append(base_ts + 300, 0).unwrap(); // interval 1
-    enc.append(base_ts + 600, 2000).unwrap(); // interval 2: temp=2000
-    // interval 3: triggers finalize(2), delta=2000
+    enc.append(base_ts, 0).unwrap(); // interval 0, current_value=0
+    enc.append(base_ts + 300, 0).unwrap(); // interval 1, delta=0
+    // interval 2: delta=2000-0=2000 (exceeds +1023)
     assert!(matches!(
-        enc.append(base_ts + 900, 0),
+        enc.append(base_ts + 600, 2000),
         Err(AppendError::DeltaOverflow {
             delta: 2000,
-            prev_value: 0,
+            current_value: 0,
             new_value: 2000
         })
     ));
 
     // Test negative delta overflow: 2000 to 0 = delta of -2000 (out of range)
     let mut enc = Encoder::<i32>::new();
-    enc.append(base_ts, 2000).unwrap(); // interval 0
-    enc.append(base_ts + 300, 2000).unwrap(); // interval 1
-    enc.append(base_ts + 600, 0).unwrap(); // interval 2: temp=0
-    // interval 3: triggers finalize(2), delta=-2000
+    enc.append(base_ts, 2000).unwrap(); // interval 0, current_value=2000
+    enc.append(base_ts + 300, 2000).unwrap(); // interval 1, delta=0
+    // interval 2: delta=0-2000=-2000 (exceeds -1024)
     assert!(matches!(
-        enc.append(base_ts + 900, 0),
+        enc.append(base_ts + 600, 0),
         Err(AppendError::DeltaOverflow {
             delta: -2000,
-            prev_value: 2000,
+            current_value: 2000,
             new_value: 0
         })
     ));
@@ -1225,12 +1223,12 @@ fn test_delta_overflow_returns_error() {
     let mut enc = Encoder::<i32>::new();
     enc.append(base_ts, 0).unwrap();
     enc.append(base_ts + 300, 0).unwrap();
-    enc.append(base_ts + 600, 1024).unwrap(); // delta will be +1024
+    // delta=1024-0=1024 (just over +1023 limit)
     assert!(matches!(
-        enc.append(base_ts + 900, 0),
+        enc.append(base_ts + 600, 1024),
         Err(AppendError::DeltaOverflow {
             delta: 1024,
-            prev_value: 0,
+            current_value: 0,
             new_value: 1024
         })
     ));
@@ -1239,12 +1237,12 @@ fn test_delta_overflow_returns_error() {
     let mut enc = Encoder::<i32>::new();
     enc.append(base_ts, 1025).unwrap();
     enc.append(base_ts + 300, 1025).unwrap();
-    enc.append(base_ts + 600, 0).unwrap(); // delta will be -1025
+    // delta=0-1025=-1025 (just over -1024 limit)
     assert!(matches!(
-        enc.append(base_ts + 900, 0),
+        enc.append(base_ts + 600, 0),
         Err(AppendError::DeltaOverflow {
             delta: -1025,
-            prev_value: 1025,
+            current_value: 1025,
             new_value: 0
         })
     ));
@@ -1297,31 +1295,31 @@ fn test_count_at_max_u16() {
 #[test]
 fn test_error_display_formatting() {
     // TimestampBeforeBase
-    let err = AppendError::TimestampBeforeBase { ts: 100, base_ts: 200 };
+    let err: AppendError<i32> = AppendError::TimestampBeforeBase { ts: 100, base_ts: 200 };
     assert!(err.to_string().contains("100"));
     assert!(err.to_string().contains("200"));
 
     // OutOfOrder
-    let err = AppendError::OutOfOrder { ts: 300, logical_idx: 1, prev_logical_idx: 2 };
+    let err: AppendError<i32> = AppendError::OutOfOrder { ts: 300, logical_idx: 1, prev_logical_idx: 2 };
     assert!(err.to_string().contains("interval"));
 
     // IntervalOverflow
-    let err = AppendError::IntervalOverflow { count: 1023 };
+    let err: AppendError<i32> = AppendError::IntervalOverflow { count: 1023 };
     assert!(err.to_string().contains("1023"));
 
     // CountOverflow
-    let err = AppendError::CountOverflow;
+    let err: AppendError<i32> = AppendError::CountOverflow;
     assert!(err.to_string().contains("65535"));
 
     // DeltaOverflow
-    let err = AppendError::DeltaOverflow { delta: 2000, prev_value: 0, new_value: 2000 };
+    let err: AppendError<i32> = AppendError::DeltaOverflow { delta: 2000, current_value: 0, new_value: 2000 };
     assert!(err.to_string().contains("2000"));
 }
 
 #[test]
 fn test_error_trait_impl() {
     use std::error::Error;
-    let err: &dyn Error = &AppendError::CountOverflow;
+    let err: &dyn Error = &AppendError::<i32>::CountOverflow;
     assert!(err.source().is_none());
 }
 
@@ -2095,6 +2093,7 @@ fn test_from_bytes_zero_count() {
 #[test]
 fn test_from_bytes_max_count_no_data() {
     // Header claims 65535 readings but has minimal data
+    // Header: base_ts(4) + count(2) + prev_idx(2) + first_value(1) + prev_value(1) + current_value(1) + zero_run(1) + bit_count(1) + bit_accum(1) = 14 bytes
     let mut buf = [0u8; 14];
     buf[4] = 0xFF; // count = 65535
     buf[5] = 0xFF;
@@ -2115,6 +2114,7 @@ fn test_from_bytes_max_count_no_data() {
 #[test]
 fn test_from_bytes_corrupted_bit_count() {
     // This is the crash case found by fuzzing: bit_count = 255 causes shift overflow
+    // Header: 14 bytes for i8
     let mut buf = vec![0u8; 20];
     buf[4] = 5;    // count = 5
     buf[5] = 0;
@@ -2132,6 +2132,7 @@ fn test_from_bytes_corrupted_bit_count() {
 #[test]
 fn test_from_bytes_max_zero_run() {
     // zero_run = 255 (max u8)
+    // Header: 14 bytes for i8
     let mut buf = vec![0u8; 20];
     buf[4] = 10;   // count = 10
     buf[5] = 0;

@@ -61,7 +61,7 @@ impl<V: Value, const INTERVAL: u16> Encoder<V, INTERVAL> {
 
     /// Append a sensor reading
     #[inline]
-    pub fn append(&mut self, ts: u32, value: V) -> Result<(), AppendError> {
+    pub fn append(&mut self, ts: u32, value: V) -> Result<(), AppendError<V>> {
         if self.count == 0 {
             self.base_ts = ts;
             self.first_value = value;
@@ -105,18 +105,22 @@ impl<V: Value, const INTERVAL: u16> Encoder<V, INTERVAL> {
             return Err(AppendError::CountOverflow);
         }
 
+        // Early check: validate the delta for THIS new value (fail fast)
+        let new_delta = value.to_i32() - self.current_value.to_i32();
+        if !(-1024..=1023).contains(&new_delta) {
+            return Err(AppendError::DeltaOverflow {
+                delta: new_delta,
+                current_value: self.current_value,
+                new_value: value,
+            });
+        }
+
         // Finalize previous interval
         if self.count == 1 {
             self.first_value = self.current_value;
         } else {
             let delta = self.current_value.to_i32() - self.prev_value.to_i32();
-            if !(-1024..=1023).contains(&delta) {
-                return Err(AppendError::DeltaOverflow {
-                    delta,
-                    prev_value: self.prev_value.to_i32(),
-                    new_value: self.current_value.to_i32(),
-                });
-            }
+            // Note: delta check already passed when this value was appended
             if delta == 0 {
                 self.zero_run = self.zero_run.saturating_add(1);
                 if u32::from(self.zero_run) >= MAX_ZERO_RUN_TIER2 {
@@ -253,7 +257,7 @@ impl<V: Value, const INTERVAL: u16> Encoder<V, INTERVAL> {
     /// # Errors
     /// Returns `AppendError::BufferTooShort` if the buffer is too short to contain a valid header.
     /// Returns `AppendError::MalformedData` if the header contains invalid values.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AppendError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AppendError<V>> {
         if bytes.is_empty() {
             return Ok(Self::new());
         }
