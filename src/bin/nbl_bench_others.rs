@@ -867,7 +867,7 @@ fn bench_delta_of_delta(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
 // ============================================================================
 
 /// Plotly CDN URL for HTML reports
-const PLOTLY_CDN: &str = "https://cdn.plot.ly/plotly-basic-2.35.2.min.js";
+const PLOTLY_CDN: &str = "https://cdn.plot.ly/plotly-2.35.2.min.js";
 
 /// Generate an HTML report with interactive Plotly charts
 fn generate_html_report(
@@ -1081,13 +1081,13 @@ fn generate_html_report(
         </div>
 
         <div class="panel wide">
-            <div class="panel-title">Compressed Size Distribution (per device)</div>
-            <div id="box-sizes" class="plot-tall"></div>
+            <div class="panel-title">Compression Ratio Distribution (per device)</div>
+            <div id="box-ratios" class="plot-tall"></div>
         </div>
 
         <div class="panel wide">
-            <div class="panel-title">Compression Ratio Distribution (per device)</div>
-            <div id="box-ratios" class="plot-tall"></div>
+            <div class="panel-title">Compression Ratio Distribution</div>
+            <div id="box-ratios-simple" class="plot-tall"></div>
         </div>
 
         <div class="panel wide">
@@ -1103,7 +1103,8 @@ fn generate_html_report(
                         <th>#</th>
                         <th>Algorithm</th>
                         <th>Ratio</th>
-                        <th>Total Size</th>
+                        <th>Raw Size</th>
+                        <th>Compressed</th>
                         <th>Avg Size</th>
                         <th>p50 Size</th>
                         <th>Encode MB/s</th>
@@ -1216,8 +1217,10 @@ fn generate_html_report(
     ], {{
         ...darkLayout,
         barmode: 'group',
+        xaxis: {{ ...darkLayout.xaxis, tickangle: 45 }},
         yaxis: {{ ...darkLayout.yaxis, title: 'Speed (MB/s)' }},
-        legend: {{ orientation: 'h', y: -0.2, font: {{ color: '#e6edf3' }} }}
+        margin: {{ t: 40, r: 20, b: 100, l: 60 }},
+        legend: {{ orientation: 'h', x: 0.5, xanchor: 'center', y: 1.0, yanchor: 'bottom', font: {{ color: '#e6edf3' }} }}
     }}, {{ responsive: true }});
 
     // 3. Box Plot: Compressed Sizes (sorted by ratio, with annotations) - include raw baseline
@@ -1227,41 +1230,112 @@ fn generate_html_report(
         return ratioB - ratioA;
     }});
 
-    Plotly.newPlot('box-sizes', boxSortedByRatio.map((algo, i) => ({{
-        y: algo === 'raw' ? benchmarkData.rawSizes : benchmarkData.sizes[algo],
-        type: 'box',
-        name: algo,
-        marker: {{ color: algo === 'raw' ? '#484f58' : colors[i % colors.length] }},
-        boxpoints: false,
-        hoverinfo: 'name'
-    }})), {{
+    // Helper to compute stats for hover
+    function computeStats(arr) {{
+        const sorted = [...arr].sort((a, b) => a - b);
+        const n = sorted.length;
+        const sum = sorted.reduce((a, b) => a + b, 0);
+        const mean = sum / n;
+        const variance = sorted.reduce((acc, v) => acc + (v - mean) ** 2, 0) / n;
+        const std = Math.sqrt(variance);
+        const q1 = sorted[Math.floor(n * 0.25)];
+        const median = sorted[Math.floor(n * 0.5)];
+        const q3 = sorted[Math.floor(n * 0.75)];
+        const iqr = q3 - q1;
+        return {{ min: sorted[0], q1, median, q3, max: sorted[n - 1], mean, std, iqr, n }};
+    }}
+
+    // 3. Box Plot: Compression Ratios (sorted by ratio, with annotations) - include raw baseline
+    const rawRatios = benchmarkData.rawSizes.map(() => 1.0);
+
+    // Create violin + box overlay for ratios
+    const ratiosTraces = boxSortedByRatio.flatMap((algo, i) => {{
+        const data = algo === 'raw' ? rawRatios : benchmarkData.ratios[algo];
+        const color = algo === 'raw' ? '#484f58' : colors[i % colors.length];
+        const stats = computeStats(data);
+        const hoverText = `<b>${{algo}}</b><br>` +
+            `n: ${{stats.n}}<br>` +
+            `min: ${{stats.min.toFixed(2)}}x<br>` +
+            `Q1: ${{stats.q1.toFixed(2)}}x<br>` +
+            `median: ${{stats.median.toFixed(2)}}x<br>` +
+            `Q3: ${{stats.q3.toFixed(2)}}x<br>` +
+            `max: ${{stats.max.toFixed(2)}}x<br>` +
+            `mean: ${{stats.mean.toFixed(2)}}x<br>` +
+            `std: ${{stats.std.toFixed(2)}}<br>` +
+            `IQR: ${{stats.iqr.toFixed(2)}}`;
+
+        return [
+            // Violin for density
+            {{
+                x: data.map(() => algo),
+                y: data,
+                type: 'violin',
+                name: algo,
+                side: 'positive',
+                line: {{ color: color, width: 1 }},
+                fillcolor: color,
+                opacity: 0.3,
+                points: false,
+                meanline: {{ visible: false }},
+                box: {{ visible: false }},
+                hoverinfo: 'skip',
+                showlegend: false,
+                scalemode: 'width',
+                width: 0.8
+            }},
+            // Box for quartiles with outliers and mean
+            {{
+                x: data.map(() => algo),
+                y: data,
+                type: 'box',
+                name: algo,
+                marker: {{ color: color, outliercolor: color, size: 3 }},
+                line: {{ color: color }},
+                boxpoints: 'outliers',
+                boxmean: 'sd',
+                jitter: 0.3,
+                pointpos: 0,
+                hovertemplate: hoverText + '<extra></extra>',
+                showlegend: false,
+                width: 0.4
+            }}
+        ];
+    }});
+
+    Plotly.newPlot('box-ratios', ratiosTraces, {{
         ...darkLayout,
         xaxis: {{ ...darkLayout.xaxis, tickangle: 45 }},
-        yaxis: {{ ...darkLayout.yaxis, title: 'Compressed Size (bytes)', type: 'log' }},
+        yaxis: {{ ...darkLayout.yaxis, title: 'Compression Ratio (x)' }},
         margin: {{ t: 40, r: 20, b: 100, l: 60 }},
         showlegend: false,
+        violinmode: 'overlay',
+        boxmode: 'overlay',
         annotations: boxSortedByRatio.flatMap((algo, i) => {{
-            const sizes = algo === 'raw' ? benchmarkData.rawSizes : benchmarkData.sizes[algo];
+            const ratios = algo === 'raw' ? rawRatios : benchmarkData.ratios[algo];
             const ratio = algo === 'raw' ? 1.0 : benchmarkData.summary[algo].ratio;
             const avgSize = algo === 'raw' ? rawAvgSize : Math.round(benchmarkData.summary[algo].total_size / benchmarkData.metadata.numDevices);
-            const maxVal = Math.max(...sizes);
+            const maxVal = Math.max(...ratios);
             return [
-                {{ x: i, y: maxVal, yanchor: 'bottom', yshift: 22, text: ratio.toFixed(1) + 'x', showarrow: false, font: {{ color: '#e6edf3', size: 11 }} }},
-                {{ x: i, y: maxVal, yanchor: 'bottom', yshift: 6, text: avgSize + 'B', showarrow: false, font: {{ color: '#7d8590', size: 10 }} }}
+                {{ x: algo, y: maxVal, yanchor: 'bottom', yshift: 22, text: ratio.toFixed(1) + 'x', showarrow: false, font: {{ color: '#e6edf3', size: 11 }} }},
+                {{ x: algo, y: maxVal, yanchor: 'bottom', yshift: 6, text: avgSize + 'B', showarrow: false, font: {{ color: '#7d8590', size: 10 }} }}
             ];
         }})
     }}, {{ responsive: true }});
 
-    // 4. Box Plot: Compression Ratios (sorted by ratio, with annotations) - include raw baseline
-    const rawRatios = benchmarkData.rawSizes.map(() => 1.0);
-    Plotly.newPlot('box-ratios', boxSortedByRatio.map((algo, i) => ({{
-        y: algo === 'raw' ? rawRatios : benchmarkData.ratios[algo],
-        type: 'box',
-        name: algo,
-        marker: {{ color: algo === 'raw' ? '#484f58' : colors[i % colors.length] }},
-        boxpoints: false,
-        hoverinfo: 'name'
-    }})), {{
+    // 5. Box Plot: Compression Ratios (no violin, just boxes with annotations)
+    Plotly.newPlot('box-ratios-simple', boxSortedByRatio.map((algo, i) => {{
+        const data = algo === 'raw' ? rawRatios : benchmarkData.ratios[algo];
+        const color = algo === 'raw' ? '#484f58' : colors[i % colors.length];
+        return {{
+            y: data,
+            type: 'box',
+            name: algo,
+            marker: {{ color: color }},
+            line: {{ color: color }},
+            boxpoints: false,
+            showlegend: false
+        }};
+    }}), {{
         ...darkLayout,
         xaxis: {{ ...darkLayout.xaxis, tickangle: 45 }},
         yaxis: {{ ...darkLayout.yaxis, title: 'Compression Ratio (x)' }},
@@ -1273,13 +1347,13 @@ fn generate_html_report(
             const avgSize = algo === 'raw' ? rawAvgSize : Math.round(benchmarkData.summary[algo].total_size / benchmarkData.metadata.numDevices);
             const maxVal = Math.max(...ratios);
             return [
-                {{ x: i, y: maxVal, yanchor: 'bottom', yshift: 22, text: ratio.toFixed(1) + 'x', showarrow: false, font: {{ color: '#e6edf3', size: 11 }} }},
-                {{ x: i, y: maxVal, yanchor: 'bottom', yshift: 6, text: avgSize + 'B', showarrow: false, font: {{ color: '#7d8590', size: 10 }} }}
+                {{ x: algo, y: maxVal, yanchor: 'bottom', yshift: 22, text: ratio.toFixed(1) + 'x', showarrow: false, font: {{ color: '#e6edf3', size: 11 }} }},
+                {{ x: algo, y: maxVal, yanchor: 'bottom', yshift: 6, text: avgSize + 'B', showarrow: false, font: {{ color: '#7d8590', size: 10 }} }}
             ];
         }})
     }}, {{ responsive: true }});
 
-    // 5. Line Chart: Percentiles
+    // 6. Line Chart: Percentiles
     const pLabels = ['min', 'p25', 'p50', 'p75', 'p90', 'p99', 'max'];
     Plotly.newPlot('line-percentiles', algos.map((algo, i) => {{
         const p = benchmarkData.summary[algo].percentiles;
@@ -1311,6 +1385,7 @@ fn generate_html_report(
             <td>${{i + 1}}</td>
             <td>${{algo}}</td>
             <td class="mono ${{isBest ? 'best' : ''}}">${{s.ratio.toFixed(1)}}x</td>
+            <td class="mono">${{benchmarkData.metadata.rawSize.toLocaleString()}}</td>
             <td class="mono">${{s.total_size.toLocaleString()}}</td>
             <td class="mono">${{avgSize}}B</td>
             <td class="mono">${{s.percentiles.p50}}B</td>

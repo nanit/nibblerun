@@ -1,7 +1,6 @@
 //! Visualize nibblerun encoded data as interactive SVG.
 
 use clap::Parser;
-use nibblerun::constants::EPOCH_BASE;
 use nibblerun::{Encoder, Reading, Value};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
@@ -66,8 +65,8 @@ struct BitSpan {
 /// The kind of data a bit span represents
 #[derive(Debug, Clone)]
 enum BitSpanKind {
-    /// Header: base timestamp (reconstructed)
-    HeaderBaseTs(u64),
+    /// Header: base timestamp
+    HeaderBaseTs(u32),
     /// Header: reading count
     HeaderCount(u16),
     /// Header: previous logical index
@@ -231,8 +230,7 @@ fn decode_with_spans<V: Value, const INTERVAL: u16>(
     let mut span_id = 0;
 
     // Parse header and create header spans
-    let base_ts_offset = read_u32_le(buf, OFF_BASE_TS_OFFSET);
-    let base_ts = EPOCH_BASE.wrapping_add(u64::from(base_ts_offset));
+    let base_ts = read_u32_le(buf, OFF_BASE_TS_OFFSET);
     header_spans.push(BitSpan {
         id: span_id,
         start_bit: OFF_BASE_TS_OFFSET * 8,
@@ -386,8 +384,8 @@ fn decode_with_spans<V: Value, const INTERVAL: u16>(
     // Now decode with span tracking
     let mut reader = BitReaderWithPos::new(&final_data);
     let mut prev_val = first_value;
-    let mut idx = 1u64;
-    let interval = u64::from(INTERVAL);
+    let mut idx = 1u32;
+    let interval = u32::from(INTERVAL);
     let header_bits = header_size * 8;
 
     while decoded.len() < count && reader.has_more() {
@@ -402,7 +400,7 @@ fn decode_with_spans<V: Value, const INTERVAL: u16>(
             });
             span_id += 1;
             decoded.push(Reading {
-                ts: (base_ts + idx * interval) as u32,
+                ts: base_ts + idx * interval,
                 value: V::from_i32(prev_val),
             });
             idx += 1;
@@ -421,7 +419,7 @@ fn decode_with_spans<V: Value, const INTERVAL: u16>(
             span_id += 1;
             prev_val = prev_val.wrapping_add(delta);
             decoded.push(Reading {
-                ts: (base_ts + idx * interval) as u32,
+                ts: base_ts + idx * interval,
                 value: V::from_i32(prev_val),
             });
             idx += 1;
@@ -452,7 +450,7 @@ fn decode_with_spans<V: Value, const INTERVAL: u16>(
             span_id += 1;
             prev_val = prev_val.wrapping_add(delta);
             decoded.push(Reading {
-                ts: (base_ts + idx * interval) as u32,
+                ts: base_ts + idx * interval,
                 value: V::from_i32(prev_val),
             });
             idx += 1;
@@ -473,7 +471,7 @@ fn decode_with_spans<V: Value, const INTERVAL: u16>(
                     break;
                 }
                 decoded.push(Reading {
-                    ts: (base_ts + idx * interval) as u32,
+                    ts: base_ts + idx * interval,
                     value: V::from_i32(prev_val),
                 });
                 idx += 1;
@@ -495,7 +493,7 @@ fn decode_with_spans<V: Value, const INTERVAL: u16>(
                     break;
                 }
                 decoded.push(Reading {
-                    ts: (base_ts + idx * interval) as u32,
+                    ts: base_ts + idx * interval,
                     value: V::from_i32(prev_val),
                 });
                 idx += 1;
@@ -515,7 +513,7 @@ fn decode_with_spans<V: Value, const INTERVAL: u16>(
             span_id += 1;
             prev_val = prev_val.wrapping_add(delta);
             decoded.push(Reading {
-                ts: (base_ts + idx * interval) as u32,
+                ts: base_ts + idx * interval,
                 value: V::from_i32(prev_val),
             });
             idx += 1;
@@ -538,7 +536,7 @@ fn decode_with_spans<V: Value, const INTERVAL: u16>(
             span_id += 1;
             prev_val = prev_val.wrapping_add(delta);
             decoded.push(Reading {
-                ts: (base_ts + idx * interval) as u32,
+                ts: base_ts + idx * interval,
                 value: V::from_i32(prev_val),
             });
             idx += 1;
@@ -551,7 +549,7 @@ fn decode_with_spans<V: Value, const INTERVAL: u16>(
                 kind: BitSpanKind::Gap(n),
             });
             span_id += 1;
-            idx += u64::from(n);
+            idx += u32::from(n);
         }
     }
 
@@ -565,7 +563,7 @@ fn decode_with_spans<V: Value, const INTERVAL: u16>(
 /// Original reading from CSV for ground truth comparison
 #[derive(Debug, Clone)]
 struct CsvReading {
-    ts: u64,
+    ts: u32,
     value: i8,
 }
 
@@ -666,7 +664,7 @@ impl SpanKind {
     }
 
     /// Generate tooltip text for bitstream view
-    fn tooltip_text(&self, ts: u64, value: i32) -> String {
+    fn tooltip_text(&self, ts: u32, value: i32) -> String {
         let ts_str = format_timestamp(ts);
         match &self.0 {
             BitSpanKind::HeaderBaseTs(v) => format!("base_ts: {} ({})", v, format_timestamp(*v)),
@@ -691,7 +689,7 @@ impl SpanKind {
     }
 
     /// Generate expanded decoded readings for hover display
-    fn decoded_readings(&self, start_ts: u64, value: i32, interval: u16) -> Vec<String> {
+    fn decoded_readings(&self, start_ts: u32, value: i32, interval: u16) -> Vec<String> {
         match &self.0 {
             BitSpanKind::HeaderBaseTs(_)
             | BitSpanKind::HeaderCount(_)
@@ -707,8 +705,8 @@ impl SpanKind {
             }
             BitSpanKind::ZeroRun8_21(n) | BitSpanKind::ZeroRun22_149(n) => {
                 let mut readings = Vec::new();
-                for i in 0..u64::from(*n) {
-                    let ts = start_ts + i * u64::from(interval);
+                for i in 0..u32::from(*n) {
+                    let ts = start_ts + i * u32::from(interval);
                     readings.push(format!("{} → {}", format_timestamp(ts), value));
                 }
                 readings
@@ -722,8 +720,8 @@ impl SpanKind {
             }
             BitSpanKind::Gap(n) => {
                 let mut readings = Vec::new();
-                for i in 0..u64::from(*n) {
-                    let ts = start_ts + i * u64::from(interval);
+                for i in 0..u32::from(*n) {
+                    let ts = start_ts + i * u32::from(interval);
                     readings.push(format!("{} → (gap)", format_timestamp(ts)));
                 }
                 readings
@@ -814,9 +812,9 @@ struct Row {
 
 #[derive(Debug)]
 struct GroundTruth {
-    original_ts: u64,
+    original_ts: u32,
     original_value: i8,
-    decoded_ts: u64,
+    decoded_ts: u32,
     decoded_value: i8,
     ts_matches: bool,
     value_matches: bool,
@@ -825,7 +823,7 @@ struct GroundTruth {
 fn build_rows(
     header_spans: &[VizSpan],
     data_spans: &[VizSpan],
-    base_ts: u64,
+    base_ts: u32,
     first_value: i32,
     interval: u16,
     csv_readings: Option<&[CsvReading]>,
@@ -861,7 +859,7 @@ fn build_rows(
 
     // Data rows
     let mut value = first_value;
-    let mut idx: u64 = 1;
+    let mut idx: u32 = 1;
     let mut event_num = 1;
     let mut csv_idx = 1usize;
 
@@ -877,12 +875,12 @@ fn build_rows(
                 },
                 ground_truth: None,
             });
-            idx += u64::from(gap_len);
+            idx += u32::from(gap_len);
         } else if let Some(run_len) = span.kind.run_length() {
             // Zero run
             let value_i8 = value as i8;
             for i in 0..run_len {
-                let ts = base_ts + idx * u64::from(interval);
+                let ts = base_ts + idx * u32::from(interval);
                 let show_bits = i == 0;
                 let gt = csv_readings.and_then(|readings| {
                     readings.get(csv_idx).map(|r| GroundTruth {
@@ -906,7 +904,7 @@ fn build_rows(
         } else if let Some(delta) = span.kind.delta() {
             // Delta
             value += delta;
-            let ts = base_ts + idx * u64::from(interval);
+            let ts = base_ts + idx * u32::from(interval);
             let value_i8 = value as i8;
             let gt = csv_readings.and_then(|readings| {
                 readings.get(csv_idx).map(|r| GroundTruth {
@@ -928,7 +926,7 @@ fn build_rows(
             csv_idx += 1;
         } else if matches!(span.kind.0, BitSpanKind::Zero) {
             // Single zero delta
-            let ts = base_ts + idx * u64::from(interval);
+            let ts = base_ts + idx * u32::from(interval);
             let value_i8 = value as i8;
             let gt = csv_readings.and_then(|readings| {
                 readings.get(csv_idx).map(|r| GroundTruth {
@@ -954,14 +952,14 @@ fn build_rows(
     rows
 }
 
-fn format_event(num: usize, ts: u64, value: i32, delta: &str) -> String {
+fn format_event(num: usize, ts: u32, value: i32, delta: &str) -> String {
     let time_str = format_timestamp(ts);
     format!("#{num:<3} {time_str}  val={value:<4} {delta}")
 }
 
 /// Format a unix timestamp as human-readable date/time
-fn format_timestamp(ts: u64) -> String {
-    let secs_per_day: u64 = 86400;
+fn format_timestamp(ts: u32) -> String {
+    let secs_per_day: u32 = 86400;
     let days_since_epoch = ts / secs_per_day;
     let time_of_day = ts % secs_per_day;
 
@@ -975,8 +973,8 @@ fn format_timestamp(ts: u64) -> String {
 }
 
 /// Convert days since 1970-01-01 to (year, month, day)
-fn days_to_ymd(days: u64) -> (u32, u32, u32) {
-    let mut remaining_days = days as i64;
+fn days_to_ymd(days: u32) -> (u32, u32, u32) {
+    let mut remaining_days = i64::from(days);
     let mut year: u32 = 1970;
 
     loop {
@@ -1048,7 +1046,7 @@ fn render_svg(
     rows: &[Row],
     has_ground_truth: bool,
     compression_stats: Option<&CompressionStats>,
-    base_ts: u64,
+    base_ts: u32,
     first_value: i32,
     interval: u16,
 ) -> String {
@@ -1164,7 +1162,7 @@ fn render_svg(
         svg.push_str(&format!(
             r#"  <rect x="{}" y="{}" width="{}" height="50" class="stats-box" rx="4"/>
   <text x="{}" y="{}" class="stats-title">COMPRESSION STATS</text>
-  <text x="{}" y="{}" class="stats-text">Raw: {} bytes ({} readings × 9 bytes)</text>
+  <text x="{}" y="{}" class="stats-text">Raw: {} bytes ({} readings × 8 bytes)</text>
   <text x="{}" y="{}" class="stats-text">Compressed: {} bytes</text>
   <text x="{}" y="{}" class="stats-highlight">Ratio: {:.1}x ({:.1}% of original)</text>
 "#,
@@ -1430,7 +1428,7 @@ fn render_bitstream(
     header_spans: &[VizSpan],
     data_spans: &[VizSpan],
     bytes: &[u8],
-    base_ts: u64,
+    base_ts: u32,
     first_value: i32,
     interval: u16,
     y_start: usize,
@@ -1463,7 +1461,7 @@ fn render_bitstream(
     let mut y = y_start + BITSTREAM_Y_OFFSET;
     let mut current_ts = base_ts;
     let mut current_value = first_value;
-    let mut idx: u64 = 0;
+    let mut idx: u32 = 0;
 
     let all_spans: Vec<&VizSpan> = header_spans.iter().chain(data_spans.iter()).collect();
 
@@ -1521,18 +1519,18 @@ fn render_bitstream(
         // Update state for next span's tooltip
         if !span.kind.is_header() {
             if let Some(run_len) = span.kind.run_length() {
-                idx += u64::from(run_len);
-                current_ts = base_ts + idx * u64::from(interval);
+                idx += u32::from(run_len);
+                current_ts = base_ts + idx * u32::from(interval);
             } else if let Some(delta) = span.kind.delta() {
                 current_value += delta;
                 idx += 1;
-                current_ts = base_ts + idx * u64::from(interval);
+                current_ts = base_ts + idx * u32::from(interval);
             } else if let Some(gap_len) = span.kind.gap_length() {
-                idx += u64::from(gap_len);
-                current_ts = base_ts + idx * u64::from(interval);
+                idx += u32::from(gap_len);
+                current_ts = base_ts + idx * u32::from(interval);
             } else if matches!(span.kind.0, BitSpanKind::Zero) {
                 idx += 1;
-                current_ts = base_ts + idx * u64::from(interval);
+                current_ts = base_ts + idx * u32::from(interval);
             }
         }
     }
@@ -1564,7 +1562,7 @@ fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), Str
             continue;
         }
 
-        let ts: u64 = parts[0]
+        let ts: u32 = parts[0]
             .trim()
             .parse()
             .map_err(|_| format!("Invalid timestamp at line {}: '{}'", line_num, parts[0]))?;
@@ -1581,9 +1579,8 @@ fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), Str
         let temp = temp_i32 as i8;
         original_readings.push(CsvReading { ts, value: temp });
 
-        let ts_u32: u32 = ts.try_into().map_err(|_| format!("Timestamp too large at line {line_num}"))?;
         encoder
-            .append(ts_u32, temp)
+            .append(ts, temp)
             .map_err(|e| format!("Encode error at line {line_num}: {e:?}"))?;
     }
 
@@ -1596,13 +1593,12 @@ fn read_csv_and_encode(path: &PathBuf) -> Result<(Vec<u8>, Vec<CsvReading>), Str
 }
 
 /// Extract base_ts and first_value from header for visualization
-fn parse_header_info(bytes: &[u8]) -> (u64, i32, u16) {
+fn parse_header_info(bytes: &[u8]) -> (u32, i32, u16) {
     if bytes.len() < HEADER_SIZE {
         return (0, 0, DEFAULT_INTERVAL);
     }
-    // New header layout: base_ts_offset at offset 0
-    let base_ts_offset = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    let base_ts = EPOCH_BASE + u64::from(base_ts_offset);
+    // New header layout: base_ts at offset 0
+    let base_ts = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     // first_value at offset 8 (for i8, it's just 1 byte but we read it properly)
     let first_value = i32::from(bytes[8] as i8);
     // interval is no longer stored in header, use default
@@ -1655,7 +1651,7 @@ fn main() {
 
     let has_ground_truth = csv_readings.is_some();
     let compression_stats = csv_readings.as_ref().map(|readings| CompressionStats {
-        raw_size: readings.len() * 9, // 8 bytes timestamp + 1 byte i8 value
+        raw_size: readings.len() * 8, // (u32, i8) with alignment padding
         compressed_size: bytes.len(),
         num_readings: readings.len(),
     });
