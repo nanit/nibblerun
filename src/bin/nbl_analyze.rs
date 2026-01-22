@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -102,7 +102,13 @@ impl Stats {
     fn print_report(&self) {
         let label_upper = self.label.to_uppercase();
         let label_title = format!("{}{}", &self.label[..1].to_uppercase(), &self.label[1..]);
-        let unit = if self.label == "temperature" { "°C" } else if self.label == "humidity" { "%" } else { "" };
+        let unit = if self.label == "temperature" {
+            "°C"
+        } else if self.label == "humidity" {
+            "%"
+        } else {
+            ""
+        };
 
         println!("\n{}", "=".repeat(70));
         println!("{} DELTA FREQUENCY ANALYSIS", label_upper);
@@ -330,9 +336,9 @@ impl Stats {
         let mut zero_run_bits: u64 = 0;
         for (len, count) in &self.zero_run_lengths {
             let bits_per_run = match *len {
-                1..=7 => u64::from(*len), // individual bits
-                8..=21 => 9,          // 11110 + 4 bits
-                22..=149 => 13,       // 111110 + 7 bits
+                1..=7 => u64::from(*len),                // individual bits
+                8..=21 => 9,                             // 11110 + 4 bits
+                22..=149 => 13,                          // 111110 + 7 bits
                 _ => 13 * u64::from(*len).div_ceil(128), // multiple 13-bit chunks
             };
             zero_run_bits += bits_per_run * count;
@@ -358,11 +364,12 @@ impl Stats {
         let gap_bits: u64 = single_gaps_count * 3 + multi_gaps_bits;
 
         let pm1_bits = pm1 * 3;
-        let pm2_bits = pm2 * 5;           // NEW: 5 bits
-        let tier_3_10_bits = tier_3_10 * 11;  // NEW: 11 bits
-        let tier_11_plus_bits = tier_11_plus * 19;  // NEW: 19 bits
+        let pm2_bits = pm2 * 5; // NEW: 5 bits
+        let tier_3_10_bits = tier_3_10 * 11; // NEW: 11 bits
+        let tier_11_plus_bits = tier_11_plus * 19; // NEW: 19 bits
 
-        let total_bits = zero_run_bits + pm1_bits + pm2_bits + tier_3_10_bits + tier_11_plus_bits + gap_bits;
+        let total_bits =
+            zero_run_bits + pm1_bits + pm2_bits + tier_3_10_bits + tier_11_plus_bits + gap_bits;
 
         println!(
             "  Zero runs:   {:>12} bits ({:>5.1}%)",
@@ -409,7 +416,12 @@ impl Stats {
 
         // Alternative 1: Remove ±2 tier, merge into ±3-10
         let alt1_pm2_bits = pm2 * 11; // ±2 uses 11 bits instead of 5
-        let alt1_total = zero_run_bits + pm1_bits + alt1_pm2_bits + tier_3_10_bits + tier_11_plus_bits + gap_bits;
+        let alt1_total = zero_run_bits
+            + pm1_bits
+            + alt1_pm2_bits
+            + tier_3_10_bits
+            + tier_11_plus_bits
+            + gap_bits;
         let alt1_diff = alt1_total as i64 - total_bits as i64;
 
         println!("Alternative 1: Remove ±2 tier (merge into ±3-10)");
@@ -422,7 +434,8 @@ impl Stats {
 
         // Alternative 2: If all gaps used 14 bits (no single-gap optimization)
         let old_gap_bits = total_gaps * 14; // old scheme: all gaps 14 bits
-        let alt2_total = zero_run_bits + pm1_bits + pm2_bits + tier_3_10_bits + tier_11_plus_bits + old_gap_bits;
+        let alt2_total =
+            zero_run_bits + pm1_bits + pm2_bits + tier_3_10_bits + tier_11_plus_bits + old_gap_bits;
         let alt2_diff = alt2_total as i64 - total_bits as i64;
 
         println!();
@@ -460,7 +473,11 @@ impl Stats {
         println!("  ─────────────────────────────────────────────────────────────────────");
 
         // Calculate average bits per zero (accounting for RLE)
-        let avg_bits_per_zero = if zeros > 0 { zero_run_bits as f64 / zeros as f64 } else { 1.0 };
+        let avg_bits_per_zero = if zeros > 0 {
+            zero_run_bits as f64 / zeros as f64
+        } else {
+            1.0
+        };
 
         println!(
             "  Zero deltas   {:>12}   {:>6.2}%    ~{:.2}      {:>12}   {:>5.1}%",
@@ -499,7 +516,11 @@ impl Stats {
             100.0 * tier_11_plus_bits as f64 / total_bits as f64
         );
         // Calculate avg bits per gap
-        let avg_gap_bits = if total_gaps > 0 { gap_bits as f64 / total_gaps as f64 } else { 3.0 };
+        let avg_gap_bits = if total_gaps > 0 {
+            gap_bits as f64 / total_gaps as f64
+        } else {
+            3.0
+        };
         println!(
             "  Gaps          {:>12}   {:>6.2}%   ~{:.1}       {:>12}   {:>5.1}%",
             format_num(total_gaps),
@@ -531,14 +552,14 @@ impl Stats {
         let pm1_pct = 100.0 * pm1 as f64 / total_events as f64;
         let zero_pct = 100.0 * zeros as f64 / total_events as f64;
         let gap_pct = 100.0 * total_gaps as f64 / total_events as f64;
-        let single_gap_pct = if total_gaps > 0 { 100.0 * single_gaps_count as f64 / total_gaps as f64 } else { 0.0 };
+        let single_gap_pct = if total_gaps > 0 {
+            100.0 * single_gaps_count as f64 / total_gaps as f64
+        } else {
+            0.0
+        };
 
-        println!(
-            "• Zero deltas dominate ({zero_pct:.2}%). RLE scheme is effective."
-        );
-        println!(
-            "• ±1 deltas are common ({pm1_pct:.2}%). 3-bit encoding is appropriate."
-        );
+        println!("• Zero deltas dominate ({zero_pct:.2}%). RLE scheme is effective.");
+        println!("• ±1 deltas are common ({pm1_pct:.2}%). 3-bit encoding is appropriate.");
         println!(
             "• ±2 deltas are rare ({pm2_pct:.2}%). 5-bit encoding keeps prefix tree balanced."
         );
@@ -568,14 +589,8 @@ impl Stats {
             "  Actual compressed:     {} bytes",
             format_num(self.actual_compressed_bytes)
         );
-        println!(
-            "  Actual compression:    {:.1}x",
-            actual_ratio
-        );
-        println!(
-            "  Estimated (bit math):  {:.1}x",
-            estimated_ratio
-        );
+        println!("  Actual compression:    {:.1}x", actual_ratio);
+        println!("  Estimated (bit math):  {:.1}x", estimated_ratio);
         println!(
             "  Estimation accuracy:   {:.1}%",
             (estimated_ratio / actual_ratio) * 100.0
@@ -643,7 +658,6 @@ impl Stats {
         let pm2_bits = pm2 * 5;
         let tier_3_10_bits = tier_3_10 * 11;
         let tier_11_plus_bits = tier_11_plus * 19;
-        let total_bits = zero_run_bits + pm1_bits + pm2_bits + tier_3_10_bits + tier_11_plus_bits + gap_bits;
 
         // Delta distribution data (sorted by delta value, -15 to +15 to show tier boundaries)
         let mut delta_labels = Vec::new();
@@ -672,7 +686,13 @@ impl Stats {
         // Value distribution (use actual range from data)
         let value_min = self.min_value.max(-50); // Clamp for display
         let value_max = self.max_value.min(100);
-        let unit = if self.label == "temperature" { "°" } else if self.label == "humidity" { "%" } else { "" };
+        let unit = if self.label == "temperature" {
+            "°"
+        } else if self.label == "humidity" {
+            "%"
+        } else {
+            ""
+        };
         let mut value_labels = Vec::new();
         let mut value_values = Vec::new();
         for v in value_min..=value_max {
@@ -710,14 +730,22 @@ impl Stats {
         let raw_mb = self.raw_input_bytes as f64 / 1_000_000.0;
         let compressed_mb = self.actual_compressed_bytes as f64 / 1_000_000.0;
         let label_title = format!("{}{}", &self.label[..1].to_uppercase(), &self.label[1..]);
-        let unit_full = if self.label == "temperature" { "°C" } else if self.label == "humidity" { "%" } else { "" };
+        let unit_full = if self.label == "temperature" {
+            "°C"
+        } else if self.label == "humidity" {
+            "%"
+        } else {
+            ""
+        };
 
         // Compression ratio distribution
         let mut sorted_ratios = self.compression_ratios.clone();
         sorted_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let percentile = |p: usize| -> f32 {
-            if sorted_ratios.is_empty() { return 0.0; }
+            if sorted_ratios.is_empty() {
+                return 0.0;
+            }
             let idx = (p * sorted_ratios.len() / 100).min(sorted_ratios.len() - 1);
             sorted_ratios[idx]
         };
@@ -755,7 +783,9 @@ impl Stats {
             }
         }
 
-        write!(file, r##"<!DOCTYPE html>
+        write!(
+            file,
+            r##"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1188,7 +1218,10 @@ Plotly.newPlot('percentilesChart', [{{
             raw_mb = raw_mb,
             compressed_mb = compressed_mb,
             zero_pct = 100.0 * zeros as f64 / total,
-            value_range = format!("{}{} to {}{}", self.min_value, unit_full, self.max_value, unit_full),
+            value_range = format!(
+                "{}{} to {}{}",
+                self.min_value, unit_full, self.max_value, unit_full
+            ),
             label_title = label_title,
             delta_labels = delta_labels,
             delta_values = delta_values,
@@ -1317,10 +1350,7 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
             if delta == 0 {
                 current_zero_run += 1;
             } else if current_zero_run > 0 {
-                *stats
-                    .zero_run_lengths
-                    .entry(current_zero_run)
-                    .or_insert(0) += 1;
+                *stats.zero_run_lengths.entry(current_zero_run).or_insert(0) += 1;
                 stats.max_zero_run = stats.max_zero_run.max(current_zero_run);
                 current_zero_run = 0;
             }
@@ -1344,10 +1374,7 @@ fn process_file(path: &PathBuf) -> Option<Stats> {
 
     // Flush remaining zero run
     if current_zero_run > 0 {
-        *stats
-            .zero_run_lengths
-            .entry(current_zero_run)
-            .or_insert(0) += 1;
+        *stats.zero_run_lengths.entry(current_zero_run).or_insert(0) += 1;
         stats.max_zero_run = stats.max_zero_run.max(current_zero_run);
     }
 
@@ -1381,11 +1408,7 @@ fn main() {
     let entries: Vec<_> = fs::read_dir(&args.dir)
         .expect("Failed to read directory")
         .filter_map(std::result::Result::ok)
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "csv")
-        })
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "csv"))
         .collect();
 
     let total_files = if args.max_files > 0 {
@@ -1394,7 +1417,11 @@ fn main() {
         entries.len()
     };
 
-    println!("Found {} CSV files, processing {}...", entries.len(), total_files);
+    println!(
+        "Found {} CSV files, processing {}...",
+        entries.len(),
+        total_files
+    );
     println!();
 
     let start = Instant::now();
@@ -1422,9 +1449,7 @@ fn main() {
             let elapsed = start.elapsed().as_secs_f64();
             let rate = count as f64 / elapsed;
             let eta = (total_files as u64 - count) as f64 / rate;
-            eprint!(
-                "\rProcessed {count}/{total_files} files ({rate:.0}/s, ETA: {eta:.0}s)  "
-            );
+            eprint!("\rProcessed {count}/{total_files} files ({rate:.0}/s, ETA: {eta:.0}s)  ");
         }
 
         // Also update on every file for first 100

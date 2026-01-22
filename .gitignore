@@ -1,2 +1,7 @@
 target
 proptest-regressions/
+6de38c22.svg
+day.nbl
+day.svg
+test_data/
+.claude/settings.local.json

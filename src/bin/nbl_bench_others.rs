@@ -176,7 +176,7 @@ fn bench_nibblerun_appendable(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResul
         encoded.push(encoder.to_bytes());
     }
     let encode_time = start.elapsed();
-    black_box(&encoded);
+    let _ = black_box(&encoded);
 
     let sizes: Vec<usize> = encoded.iter().map(|b| b.len()).collect();
 
@@ -185,7 +185,7 @@ fn bench_nibblerun_appendable(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResul
     for buf in &encoded {
         let enc = nibblerun::Encoder::<i8, 300>::from_bytes(buf).unwrap();
         let decoded = enc.decode();
-        black_box(decoded);
+        let _ = black_box(decoded);
     }
     let decode_time = start.elapsed();
 
@@ -227,7 +227,7 @@ fn bench_nibblerun_freeze(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
     let start = Instant::now();
     for buf in &encoded {
         let decoded = nibblerun::decode_frozen::<i8, 300>(buf);
-        black_box(decoded);
+        let _ = black_box(decoded);
     }
     let decode_time = start.elapsed();
 
@@ -337,7 +337,11 @@ fn bench_lz4(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
         let mut ts = base_ts;
         for i in 0..(count - 1) {
             let delta_offset = 8 + i * 2;
-            let delta = u16::from_le_bytes(decompressed[delta_offset..delta_offset + 2].try_into().unwrap());
+            let delta = u16::from_le_bytes(
+                decompressed[delta_offset..delta_offset + 2]
+                    .try_into()
+                    .unwrap(),
+            );
             ts = ts.wrapping_add(delta as u32);
             timestamps.push(ts);
         }
@@ -405,7 +409,11 @@ fn bench_zstd(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
         let mut ts = base_ts;
         for i in 0..(count - 1) {
             let delta_offset = 8 + i * 2;
-            let delta = u16::from_le_bytes(decompressed[delta_offset..delta_offset + 2].try_into().unwrap());
+            let delta = u16::from_le_bytes(
+                decompressed[delta_offset..delta_offset + 2]
+                    .try_into()
+                    .unwrap(),
+            );
             ts = ts.wrapping_add(delta as u32);
             timestamps.push(ts);
         }
@@ -533,7 +541,11 @@ fn bench_snappy(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
         let mut ts = base_ts;
         for i in 0..(count - 1) {
             let delta_offset = 8 + i * 2;
-            let delta = u16::from_le_bytes(decompressed[delta_offset..delta_offset + 2].try_into().unwrap());
+            let delta = u16::from_le_bytes(
+                decompressed[delta_offset..delta_offset + 2]
+                    .try_into()
+                    .unwrap(),
+            );
             ts = ts.wrapping_add(delta as u32);
             timestamps.push(ts);
         }
@@ -673,7 +685,11 @@ fn bench_brotli(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
         let mut ts = base_ts;
         for i in 0..(count - 1) {
             let delta_offset = 8 + i * 2;
-            let delta = u16::from_le_bytes(decompressed[delta_offset..delta_offset + 2].try_into().unwrap());
+            let delta = u16::from_le_bytes(
+                decompressed[delta_offset..delta_offset + 2]
+                    .try_into()
+                    .unwrap(),
+            );
             ts = ts.wrapping_add(delta as u32);
             timestamps.push(ts);
         }
@@ -697,8 +713,8 @@ fn bench_brotli(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
 
 /// Deflate compression (columnar format with delta-encoded timestamps)
 fn bench_deflate(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
-    use flate2::read::{DeflateDecoder, DeflateEncoder};
     use flate2::Compression;
+    use flate2::read::{DeflateDecoder, DeflateEncoder};
     use std::io::Read;
 
     // Encode
@@ -748,7 +764,11 @@ fn bench_deflate(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
         let mut ts = base_ts;
         for i in 0..(count - 1) {
             let delta_offset = 8 + i * 2;
-            let delta = u16::from_le_bytes(decompressed[delta_offset..delta_offset + 2].try_into().unwrap());
+            let delta = u16::from_le_bytes(
+                decompressed[delta_offset..delta_offset + 2]
+                    .try_into()
+                    .unwrap(),
+            );
             ts = ts.wrapping_add(delta as u32);
             timestamps.push(ts);
         }
@@ -834,7 +854,9 @@ fn bench_delta_of_delta(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
             let mut prev_ts = second_ts;
             for i in 2..count {
                 let dod_offset = 10 + (i - 2) * 2;
-                let dod = i16::from_le_bytes(decompressed[dod_offset..dod_offset + 2].try_into().unwrap()) as i32;
+                let dod = i16::from_le_bytes(
+                    decompressed[dod_offset..dod_offset + 2].try_into().unwrap(),
+                ) as i32;
                 let delta = prev_delta + dod;
                 let ts = (prev_ts as i32 + delta) as u32;
                 timestamps.push(ts);
@@ -844,12 +866,16 @@ fn bench_delta_of_delta(data: &HashMap<u32, Vec<(u32, i8)>>) -> BenchResult {
         }
 
         // Values start after header (8) + first_delta (2) + dod array ((count-2)*2)
-        let values_offset = if count >= 2 { 8 + 2 + (count - 2) * 2 } else { 8 };
+        let values_offset = if count >= 2 {
+            8 + 2 + (count - 2) * 2
+        } else {
+            8
+        };
         let mut values = Vec::with_capacity(count);
         for i in 0..count {
             values.push(decompressed[values_offset + i] as i8);
         }
-        black_box((timestamps, values));
+        let _ = black_box((timestamps, values));
     }
     let decode_time = start.elapsed();
 
@@ -1476,13 +1502,7 @@ fn main() {
     // Print baseline (raw) first
     println!(
         "{:<18} | {:>8} | {:>8.1} | {:>10} | {:>6.1}x | {:>11} | {:>11}",
-        "raw (baseline)",
-        raw_stats.p50,
-        raw_stats.avg,
-        raw_stats.total,
-        1.0,
-        "-",
-        "-"
+        "raw (baseline)", raw_stats.p50, raw_stats.avg, raw_stats.total, 1.0, "-", "-"
     );
 
     // Print results
@@ -1494,45 +1514,59 @@ fn main() {
 
         println!(
             "{:<18} | {:>8} | {:>8.1} | {:>10} | {:>6.1}x | {:>11.1} | {:>11.1}",
-            result.name,
-            stats.p50,
-            stats.avg,
-            stats.total,
-            ratio,
-            encode_mbs,
-            decode_mbs
+            result.name, stats.p50, stats.avg, stats.total, ratio, encode_mbs, decode_mbs
         );
     }
 
     // Print per-device compressed size percentiles
     println!("\n=== Per-Device Compressed Size (bytes) ===");
-    println!("{:<18} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6}",
-        "Algorithm", "min", "p25", "p50", "p75", "p90", "p99", "max");
+    println!(
+        "{:<18} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6}",
+        "Algorithm", "min", "p25", "p50", "p75", "p90", "p99", "max"
+    );
     println!("{}", "-".repeat(85));
 
     // Baseline raw sizes
     println!(
         "{:<18} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6}",
-        "raw (baseline)", raw_stats.min, raw_stats.p25, raw_stats.p50, raw_stats.p75, raw_stats.p90, raw_stats.p99, raw_stats.max
+        "raw (baseline)",
+        raw_stats.min,
+        raw_stats.p25,
+        raw_stats.p50,
+        raw_stats.p75,
+        raw_stats.p90,
+        raw_stats.p99,
+        raw_stats.max
     );
 
     for result in &results {
         let stats = compute_stats(&result.sizes);
         println!(
             "{:<18} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6}",
-            result.name, stats.min, stats.p25, stats.p50, stats.p75, stats.p90, stats.p99, stats.max
+            result.name,
+            stats.min,
+            stats.p25,
+            stats.p50,
+            stats.p75,
+            stats.p90,
+            stats.p99,
+            stats.max
         );
     }
 
     // Print per-device compression ratio percentiles
     println!("\n=== Per-Device Compression Ratio ===");
-    println!("{:<18} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6}",
-        "Algorithm", "min", "p25", "p50", "p75", "p90", "p99", "max");
+    println!(
+        "{:<18} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6}",
+        "Algorithm", "min", "p25", "p50", "p75", "p90", "p99", "max"
+    );
     println!("{}", "-".repeat(85));
 
     for result in &results {
         // Calculate per-device ratios
-        let ratios: Vec<f64> = result.raw_sizes.iter()
+        let ratios: Vec<f64> = result
+            .raw_sizes
+            .iter()
             .zip(result.sizes.iter())
             .map(|(&raw, &compressed)| raw as f64 / compressed as f64)
             .collect();
@@ -1541,7 +1575,9 @@ fn main() {
         sorted_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         let ratio_percentile = |p: f64| -> f64 {
-            if sorted_ratios.is_empty() { return 0.0; }
+            if sorted_ratios.is_empty() {
+                return 0.0;
+            }
             let idx = ((sorted_ratios.len() - 1) as f64 * p) as usize;
             sorted_ratios[idx]
         };
@@ -1549,13 +1585,13 @@ fn main() {
         println!(
             "{:<18} | {:>6.1} | {:>6.1} | {:>6.1} | {:>6.1} | {:>6.1} | {:>6.1} | {:>6.1}",
             result.name,
-            ratio_percentile(0.0),  // min
+            ratio_percentile(0.0), // min
             ratio_percentile(0.25),
             ratio_percentile(0.50),
             ratio_percentile(0.75),
             ratio_percentile(0.90),
             ratio_percentile(0.99),
-            ratio_percentile(1.0),  // max
+            ratio_percentile(1.0), // max
         );
     }
 
